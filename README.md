@@ -105,6 +105,28 @@ Confirmed from a captured log (53 frames on GPIO27, 66 frames on GPIO26):
 
 The GPIO27 frame is the periodic baseboard status/heartbeat — frame starts land almost exactly **220 ms apart** for essentially the whole capture. The GPIO26 frame is invariant byte-for-byte across all 66 occurrences in this capture; it sometimes appears as isolated frames and sometimes as bursts about **20.8 ms apart**, consistent with a console-originated command/acknowledgement rather than a periodic heartbeat.
 
+### Message timing (measured from `log1.txt`)
+
+GPIO27's 53 frames, by payload variant:
+
+| Count | Frame | Payload difference |
+|---|---|---|
+| 48 | `68 0C A0 00 00 00 00 9F 00 00 00 00 4B 43` | steady-state (baseline) |
+| 4 | `68 0C A0 00 00 00 00 A0 00 00 00 00 4C 43` | payload byte 7: `9F` -> `A0` |
+| 1 | `68 0C A0 00 00 00 00 9F 00 01 00 00 4C 43` | payload byte 9: `00` -> `01` |
+
+Reconstructing all 53 frames' start timestamps from the raw per-byte log and diffing them: every GPIO27 frame — regardless of which of the three payloads it carries — lands on the same fixed **220 ms tick** (measured range 219.90–226.67 ms, average 220.13 ms across all 52 gaps). The three payloads are not separately-timed message types; they're mutually exclusive states reported on one fixed heartbeat slot. A given payload can occupy consecutive ticks — the `A0` variant appears three ticks in a row once in this capture.
+
+Gap between repeats of the *same* payload (i.e. skipping ticks occupied by a different payload):
+
+| Payload | Occurrences | Gap between repeats |
+|---|---|---|
+| `9F...00...00` (baseline) | 48 | 220 ms typical, up to 880 ms (4 ticks) when another payload pre-empts a slot |
+| `A0...00...00` | 4 | 220 ms when back-to-back, up to 5.5 s (25 ticks) between separated occurrences |
+| `9F...01...00` | 1 | only one occurrence in this capture — no repeat interval yet |
+
+For contrast, GPIO26 does **not** run on a fixed period: the same invariant frame (`68 08 20 00 00 00 00 14 3C 43`) either appears in isolation or as a burst of ~6–7 repeats spaced **~9.8–20.8 ms apart** (drifting up to ~40–90 ms toward the end of a burst), with **~1.07–1.25 s** gaps between bursts — consistent with a command being retransmitted by the console rather than a periodic status tick.
+
 No `FRAME_ERR`, `PARITY_ERR`, `FIFO_OVF`, or `BUFFER_FULL` events were seen in this capture, so the divider + UART setup reads as electrically clean at this baud rate.
 
 Captured frames observed so far all share this shape:
