@@ -33,7 +33,7 @@ For installed operation the ESP32 board may be fed from the console's regulated 
 - 1200 baud, 8 data bits, no parity, 2 stop bits
 - UART0 remains the normal USB serial/programming console
 
-Direction was confirmed by capture, not assumed in advance — see "Wire direction" under Protocol observations below. The firmware's raw output still labels bytes by GPIO rather than by direction; see Output below.
+Direction was confirmed by capture, not assumed in advance — see "Wire direction" under Protocol observations below. The firmware's output now labels frames by direction (`BASE->CON` / `CON->BASE`) rather than by raw GPIO name; see Output below.
 
 ## Bootstrap on Ubuntu / Mint / Debian
 
@@ -67,30 +67,46 @@ Exit the ESP-IDF monitor with `Ctrl+]`.
 
 ## Output
 
-The baseline firmware emits one line per byte:
+The firmware reassembles each direction's byte stream into complete `68 LEN ... CS 43` frames (frame shape and checksum are covered under "Protocol observations" below) and emits one line per complete, checksum-valid frame:
 
 ```text
-000001234567 GPIO26 68
-000001243729 GPIO26 0C
-000001252891 GPIO26 A0
-000001272201 GPIO27 68
+000001234567 BASE->CON OK 68 0C A0 00 00 00 00 9F 00 00 00 00 4B 43
+000001234787 CON->BASE OK 68 08 20 00 00 00 00 14 3C 43
 ```
 
-The source is named by GPIO, not by direction, in this raw output — that's a deliberate baseline choice so the capture path never assumes semantics. Wiring direction has since been confirmed by capture analysis (GPIO26 = console/HC32L130 -> baseboard, GPIO27 = baseboard -> console/HC32L130; see "Wire direction" under Protocol observations below), but the firmware itself is unchanged and still emits `GPIO26`/`GPIO27`, not direction labels.
+Direction is printed directly — `BASE->CON` (baseboard -> console/HC32L130, tapped on GPIO27) and `CON->BASE` (console/HC32L130 -> baseboard, tapped on GPIO26) — rather than the raw `GPIO26`/`GPIO27` tag an earlier revision of this firmware used; see "Wire direction" below for how the mapping was confirmed.
 
-Timestamps are software receive time (when the sniffer task pulled the byte out of the UART driver's ring buffer), not oscilloscope-grade wire-arrival time. At 1200 baud 8N2 (~9.17 ms per character) ordinary scheduler jitter is far smaller than the inter-byte spacing, so this is fine for protocol reverse engineering but should not be treated as precise bit-level timing.
+Timestamps are software receive time (when the sniffer task pulled the frame's first byte out of the UART driver's ring buffer), not oscilloscope-grade wire-arrival time. At 1200 baud 8N2 (~9.17 ms per character) ordinary scheduler jitter is far smaller than the inter-byte spacing, so this is fine for protocol reverse engineering but should not be treated as precise bit-level timing.
+
+### Mangled data
+
+Anything that doesn't parse as a complete, checksum-valid frame is printed as its own line, clearly distinct from a real message, instead of being folded into a byte stream or silently dropped:
+
+```text
+000001235012 CON->BASE MANGLED bad_checksum computed=4C 68 0C A0 00 00 00 00 9F 00 00 00 00 4D 43
+000001235300 BASE->CON MANGLED stray_bytes 0E 00 00 00 4B 43
+000001236500 CON->BASE MANGLED timeout_incomplete 68 0C A0
+```
+
+- `bad_checksum` / `bad_end=XX` — a complete frame's worth of bytes was collected, but the checksum or the trailing `0x43` didn't match.
+- `len_too_small` / `len_too_large` — the byte after `0x68` implied an implausible frame length and was rejected immediately rather than waiting on a frame that was never coming.
+- `stray_bytes` — bytes that didn't start with `0x68` (capture noise, or the parser resynchronizing after a corrupt frame).
+- `timeout_incomplete` — a frame (or a run of stray bytes) sat unfinished for 750 ms with nothing further arriving, so it was flushed rather than held forever. This is also what reports the sniffer's own startup/shutdown boundaries: it can start listening mid-frame, and a capture stopped mid-frame leaves a partial one.
+- `interrupted_by_overflow` — an in-progress frame was abandoned because the UART driver reported `FIFO_OVF`/`BUFFER_FULL` (see Error events below); the lost bytes can't be recovered, so what was collected so far is reported instead of discarded silently.
+
+This parser (framing, length handling, and checksum validation) was verified by replaying the full `log1.txt` capture byte-for-byte through the same logic: every one of the 53 `BASE->CON` and 66 `CON->BASE` real frames comes back `OK`, and the only `MANGLED` output is the capture's own start/end boundaries — 6 bytes of a frame the capture began mid-way through, and a trailing frame still in progress when the capture ended.
 
 ### Error events
 
 UART framing/parity errors and RX overflow are reported inline as their own lines rather than being silently dropped, so a later analysis doesn't mistake a lossy capture for a complete one:
 
 ```text
-000001234567 GPIO26 ERROR FRAME_ERR
-000001235012 GPIO27 ERROR FIFO_OVF bytes_lost=unknown
-000001235014 GPIO27 ERROR RX_FLUSH
+000001234567 CON->BASE ERROR FRAME_ERR
+000001235012 BASE->CON ERROR FIFO_OVF bytes_lost=unknown
+000001235014 BASE->CON ERROR RX_FLUSH
 ```
 
-`FIFO_OVF` and `BUFFER_FULL` are followed by an `RX_FLUSH` line once the driver's input buffer has been flushed to recover; any bytes lost to the overflow are not recoverable and are not counted.
+`FIFO_OVF` and `BUFFER_FULL` are followed by an `RX_FLUSH` line once the driver's input buffer has been flushed to recover, and by a `MANGLED interrupted_by_overflow` line for any frame that was in progress at the time (see Mangled data above); any bytes lost to the overflow are not recoverable and are not counted.
 
 ## Protocol observations (preliminary, not yet a contract)
 
@@ -179,4 +195,4 @@ Across the three samples above, only two payload positions changed:
 
 Everything else (`A0 00 00 00 00 ... 00 00`) held constant. These two positions are the best current lead on which fields carry live console/baseboard state, but this is still an observation from a handful of frames, not a validated field map — treat as a starting point for further capture and correlation, not as ground truth.
 
-This section documents in-progress reverse engineering, not firmware behavior; the baseline sniffer still emits raw, uninterpreted bytes exactly as described above and does not validate or act on this checksum. See `REQUIREMENTS.md` for the frozen baseline intent and future stages.
+Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
