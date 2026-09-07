@@ -127,6 +127,16 @@ Gap between repeats of the *same* payload (i.e. skipping ticks occupied by a dif
 
 For contrast, GPIO26 does **not** run on a fixed period: the same invariant frame (`68 08 20 00 00 00 00 14 3C 43`) either appears in isolation or as a burst of ~6–7 repeats spaced **~9.8–20.8 ms apart** (drifting up to ~40–90 ms toward the end of a burst), with **~1.07–1.25 s** gaps between bursts — consistent with a command being retransmitted by the console rather than a periodic status tick.
 
+### The two streams are not synchronized
+
+Cross-referencing frame timestamps between GPIO26 and GPIO27 directly (not just each stream's own stats) shows the two run on independent, free-running clocks:
+
+- **Burst period is not an integer multiple of the heartbeat tick.** GPIO26's burst-to-burst gaps are highly consistent (`1073.333`/`1073.334 ms` or `1253.334 ms`, repeatable to the microsecond across the capture) but land at **4.879×** or **5.697×** the 220 ms GPIO27 tick — not a clean 5× or 6×, so the burst cadence isn't derived by counting GPIO27 ticks. The two gap values differ by exactly `180.00 ms`, suggesting the console's own loop occasionally takes one extra step of that size — internal to GPIO26's side, unrelated to GPIO27.
+- **The phase relationship drifts freely.** The offset from each GPIO26 burst start to the nearest surrounding GPIO27 frame, across all 9 bursts in this capture: `179, 72, 146, 39, 152, 46, 159, 46 ms` (plus edge cases at the very start/end of the log). That spans nearly the entire 0–220 ms tick window with no repeating pattern — a phase-locked or triggered relationship would hold that offset roughly constant instead.
+- **They are not paired 1:1.** Early in the capture there are four consecutive GPIO27 heartbeat ticks (`t = 594, 814, 1034, 1254 ms`) with zero GPIO26 activity interleaved between them.
+
+In short: GPIO27 (baseboard) ticks on its own fixed 220 ms clock and GPIO26 (console) bursts on its own ~1073/1253 ms clock; they interleave in the capture because both run continuously, not because either one triggers or paces the other.
+
 No `FRAME_ERR`, `PARITY_ERR`, `FIFO_OVF`, or `BUFFER_FULL` events were seen in this capture, so the divider + UART setup reads as electrically clean at this baud rate.
 
 Captured frames observed so far all share this shape:
