@@ -10,6 +10,13 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+/* Keep in sync with version.txt in this firmware's project directory --
+ * that file sets the version embedded in the compiled binary's app
+ * description (queryable via `esptool.py image_info` / OTA); this constant
+ * is what actually gets printed in the serial boot banner below. */
+#define FW_NAME                 "frame-sniffer"
+#define FW_VERSION               "1.0.0"
+
 #define SNIFF_BAUD              1200
 #define SNIFF_RX_BUFFER_SIZE    2048
 #define SNIFF_EVENT_QUEUE_LEN   20
@@ -366,7 +373,7 @@ void app_main(void)
     init_sniff_uart(&s_line_a);
     init_sniff_uart(&s_line_b);
 
-    printf("\nESP32 treadmill UART sniffer\n");
+    printf("\nESP32 treadmill UART sniffer -- %s v%s\n", FW_NAME, FW_VERSION);
     printf("ESP-IDF target: ESP32\n");
     printf("UART1 RX: GPIO26 (%s), 1200 8N2\n", LINE_A_NAME);
     printf("UART2 RX: GPIO27 (%s), 1200 8N2\n", LINE_B_NAME);

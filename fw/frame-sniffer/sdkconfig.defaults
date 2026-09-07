@@ -1,0 +1,8 @@
+# UART0 / USB serial console
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Keep baseline logging modest so raw sniffer output stays readable.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+
+# Original ESP32 has dual cores; no special scheduler configuration is required.

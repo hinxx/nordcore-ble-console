@@ -33,7 +33,20 @@ For installed operation the ESP32 board may be fed from the console's regulated 
 - 1200 baud, 8 data bits, no parity, 2 stop bits
 - UART0 remains the normal USB serial/programming console
 
-Direction was confirmed by capture, not assumed in advance — see "Wire direction" under Protocol observations below. The firmware's output now labels frames by direction (`BASE->CON` / `CON->BASE`) rather than by raw GPIO name; see Output below.
+Direction was confirmed by capture, not assumed in advance — see "Wire direction" under Protocol observations below. The current default firmware's output labels frames by direction (`BASE->CON` / `CON->BASE`) rather than by raw GPIO name; see Output below.
+
+## Firmware builds
+
+This repo can hold more than one firmware at once, each in its own `fw/<name>/` directory as a fully independent ESP-IDF project (own `CMakeLists.txt`, own `main/` component, own `sdkconfig.defaults`, own `version.txt`). They share the one `.tooling/esp-idf` toolchain checkout but never share build output or app code. That's the going-forward convention here: a new firmware feature substantial enough to change *how the sniffer behaves*, not just extend it, becomes a new `fw/<name>/` directory rather than a rewrite of an existing one — so an older, still-useful behavior stays buildable and flashable on its own instead of being lost to history.
+
+| Firmware | Version | What it does |
+|---|---|---|
+| `fw/frame-sniffer/` (default) | 1.0.0 | Reassembles both directions into complete `68/LEN/payload/CS/43` frames; prints one `OK`/`MANGLED` line per frame, labeled by direction (`BASE->CON`/`CON->BASE`). See Output below. |
+| `fw/byte-sniffer/` | 1.0.0 | The earlier one-line-per-byte firmware this project started from, extracted here so it stays available — useful when you want the rawest possible view (e.g. debugging the framing/checksum logic itself, or a protocol variant the frame parser doesn't recognize). Labels by GPIO (`GPIO26`/`GPIO27`), not direction. |
+
+Each firmware's version lives in two places kept in sync by hand: `fw/<name>/version.txt` (which ESP-IDF embeds into the compiled binary's app description — check it later with `esptool.py image_info` or over OTA) and an `FW_VERSION` macro in that firmware's `main.c` (which is what actually gets printed in the serial boot banner). Confirmed by building both and checking the configure-step output: `App "treadmill_frame_sniffer" version: 1.0.0` and `App "treadmill_byte_sniffer" version: 1.0.0`, each independent of the other and of the repo's own git state. Bump a firmware's version in both places together when its behavior changes.
+
+`./tools/idf.sh` defaults to `frame-sniffer`; pass `-f <name>` (or `--fw <name>`) before the `idf.py` arguments to target a different one, e.g. `./tools/idf.sh -f byte-sniffer build`.
 
 ## Bootstrap on Ubuntu / Mint / Debian
 
@@ -52,7 +65,8 @@ If host prerequisites are already installed:
 ## Build
 
 ```bash
-./tools/idf.sh build
+./tools/idf.sh build                    # builds fw/frame-sniffer (default)
+./tools/idf.sh -f byte-sniffer build     # builds fw/byte-sniffer instead
 ```
 
 ## Flash and monitor
@@ -61,6 +75,7 @@ Find the USB serial port, commonly `/dev/ttyUSB0`, then:
 
 ```bash
 ./tools/idf.sh -p /dev/ttyUSB0 flash monitor
+./tools/idf.sh -f byte-sniffer -p /dev/ttyUSB0 flash monitor
 ```
 
 Exit the ESP-IDF monitor with `Ctrl+]`.
@@ -74,7 +89,7 @@ The firmware reassembles each direction's byte stream into complete `68 LEN ... 
 000001234787 CON->BASE OK 68 08 20 00 00 00 00 14 3C 43
 ```
 
-Direction is printed directly — `BASE->CON` (baseboard -> console/HC32L130, tapped on GPIO27) and `CON->BASE` (console/HC32L130 -> baseboard, tapped on GPIO26) — rather than the raw `GPIO26`/`GPIO27` tag an earlier revision of this firmware used; see "Wire direction" below for how the mapping was confirmed.
+Direction is printed directly — `BASE->CON` (baseboard -> console/HC32L130, tapped on GPIO27) and `CON->BASE` (console/HC32L130 -> baseboard, tapped on GPIO26) — rather than the raw `GPIO26`/`GPIO27` tag `fw/byte-sniffer/` still uses (see "Firmware builds" above); see "Wire direction" below for how the mapping was confirmed.
 
 Timestamps are software receive time (when the sniffer task pulled the frame's first byte out of the UART driver's ring buffer), not oscilloscope-grade wire-arrival time. At 1200 baud 8N2 (~9.17 ms per character) ordinary scheduler jitter is far smaller than the inter-byte spacing, so this is fine for protocol reverse engineering but should not be treated as precise bit-level timing.
 
