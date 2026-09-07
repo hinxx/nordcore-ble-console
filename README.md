@@ -76,4 +76,18 @@ The baseline firmware emits one line per byte:
 
 The source is deliberately named by GPIO until the physical direction of each tapped line is recorded conclusively.
 
+Timestamps are software receive time (when the sniffer task pulled the byte out of the UART driver's ring buffer), not oscilloscope-grade wire-arrival time. At 1200 baud 8N2 (~9.17 ms per character) ordinary scheduler jitter is far smaller than the inter-byte spacing, so this is fine for protocol reverse engineering but should not be treated as precise bit-level timing.
+
+### Error events
+
+UART framing/parity errors and RX overflow are reported inline as their own lines rather than being silently dropped, so a later analysis doesn't mistake a lossy capture for a complete one:
+
+```text
+000001234567 GPIO26 ERROR FRAME_ERR
+000001235012 GPIO27 ERROR FIFO_OVF bytes_lost=unknown
+000001235014 GPIO27 ERROR RX_FLUSH
+```
+
+`FIFO_OVF` and `BUFFER_FULL` are followed by an `RX_FLUSH` line once the driver's input buffer has been flushed to recover; any bytes lost to the overflow are not recoverable and are not counted.
+
 See `REQUIREMENTS.md` for the frozen baseline intent and future stages.
