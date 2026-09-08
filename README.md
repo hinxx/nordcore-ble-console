@@ -417,13 +417,13 @@ Everything above, consolidated. Offsets are 0-indexed from the frame's leading `
 | 1 | `0x0C` | Known | Length field: bytes after itself (payload + CS + end) |
 | 2 | `A0` / `A1` | Partial | Status/state flag — toggles active vs. idle-ish, but the exact trigger edge isn't pinned down |
 | 3:4 | big-endian uint16 | **Known** (lookup table, not a closed-form formula) | Measured/actual speed; mirrors `CON->BASE` bytes 4:5 with small real jitter (±1–3 units). See "Full-range calibration" above for the 53-point speed table |
-| 5 | `0x00` always | Unknown | Never seen anything but zero across 5+ sessions — reserved, or an untested field (incline? error state?) |
-| 6 | `0x00`, one exception `0x01` | Unknown | The single `0x01` was the very first frame right as "play" was pressed (`log4`) — n=1, too thin to conclude anything |
+| 5 | `0x00` always | **Step-counter candidate** | Never seen anything but zero across 5+ sessions — but nobody physically stepped on the belt in any of them (buttons only), and the console's own step count read `0` throughout every test too. Steps is a baseboard-side physical sensor event (unlike distance/calories/time, which kept changing with zero steps and are almost certainly console-computed from speed x elapsed time, not baseboard-transmitted) — so this offset never getting exercised is exactly what you'd expect if it *is* the step counter. Predicted: a capture where someone actually walks should make this nonzero |
+| 6 | `0x00`, one exception `0x01` | **Step-counter candidate** | Same reasoning as offset 5. The single `0x01` (very first frame right as "play" was pressed, `log4`) is still n=1 and inconclusive on its own |
 | 7 | `9D` / `9E` / `9F` / `A0` | Partial | Confirmed *unrelated* to run/speed state (drifts on its own schedule across every session) — what it actually represents is still unknown |
 | 8 | correlates with speed | Partial (correlated, no exact formula) | Lagged/filtered actual-speed reading — catches up to the setpoint during a ramp; ratio to bytes 3:4 settles to ~31.3–31.5 once held above ~1.5 km/h; roughly `23.0 x speed_km/h + 3.4` |
 | 9 | `0x00`–`0x06` | Unknown | Weak, noisy correlation with ramp phase — also the source of the rare idle `...00 01 00 00...` variant seen in `log1` |
-| 10 | `0x00` always | Unknown | Never seen anything but zero |
-| 11 | `0x00` always | Unknown | Never seen anything but zero |
+| 10 | `0x00` always | **Step-counter candidate** | Same reasoning as offset 5 |
+| 11 | `0x00` always | **Step-counter candidate** | Same reasoning as offset 5 |
 | 12 | derived | Known | Checksum — 8-bit sum of bytes 1–11, mod 256 |
 | 13 | `0x43` | Known | End byte, fixed |
 
@@ -441,6 +441,8 @@ Everything above, consolidated. Offsets are 0-indexed from the frame's leading `
 | 8 | derived | Known | Checksum — 8-bit sum of bytes 1–7, mod 256 |
 | 9 | `0x43` | Known | End byte, fixed |
 
-Every test run so far has only exercised **speed** (play/stop/±0.1 km/h/hold-to-limits). Nothing has touched incline (if this treadmill has it) or any error/fault condition — the always-zero bytes (`BASE->CON` 5/10/11, `CON->BASE` 6) are prime candidates for fields that simply haven't been triggered yet, not necessarily unused.
+Every test run so far has only exercised **speed** (play/stop/±0.1 km/h/hold-to-limits) via the console's buttons, with the belt spinning freely and nobody actually walking on it. Nothing has touched incline (if this treadmill has it) or any error/fault condition — the always-zero bytes are prime candidates for fields that simply haven't been triggered yet, not necessarily unused.
+
+The console tracks five quantities: distance, calories, steps, time, and speed. Across every capture so far, steps read `0` throughout (matching nobody walking) while distance/calories/time kept changing anyway — which only makes sense if those three are computed from speed x elapsed time on the **console** side rather than transmitted by the baseboard, since the baseboard has no way to know them otherwise. Steps is different: it requires an actual physical sensor event (a footfall on the belt) that only the baseboard side can detect — "the device is really dumb, but it does detect if someone is on it and making steps." That lines up exactly with `BASE->CON` offsets 5, 6, 10, and 11 being the *only* byte positions that have never shown variation across 2264 frames from 8 sessions: not because they're unused, but because the one physical event that would set them never happened in any test run so far. **Predicted next capture**: someone actually walking on the belt (not just holding a button) should make one of those four offsets finally leave `0` — whichever one does is very likely the step counter.
 
 Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of bytes not covered above — see "Byte interpretation summary" just above, and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
