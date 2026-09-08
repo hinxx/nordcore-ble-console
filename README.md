@@ -139,7 +139,9 @@ Like any BLE notification, delivery is best-effort: a frame that arrives with no
 Any BLE central can connect, discover the `Treadmill Sniffer` service, and subscribe to `RX_LOG`'s notifications (write `0x01 0x00` to its CCCD, or use your app's "enable notifications" toggle):
 
 - **nRF Connect** (Android/iOS) or **LightBlue** (iOS/macOS) — connect to `TreadmillSniffer`, open the service, tap the notify icon on `RX_LOG`.
-- A simple Python client (e.g. [`bleak`](https://github.com/hbldh/bleak)) on Linux/macOS/Windows, subscribing to the `RX_LOG` characteristic UUID above.
+- `tools/ble_monitor.py` — a small [`bleak`](https://github.com/hbldh/bleak)-based Python client included in this repo. Scans for the device by name (`TreadmillSniffer`) rather than a hardcoded address — necessary on macOS, which hides real BLE hardware addresses from apps — and decodes each `RX_LOG` record into `<direction> <hex frame bytes>`. `pip install bleak && python3 tools/ble_monitor.py`.
+
+**Validated on real hardware**: a full play → run → ramp-down → idle test captured with `tools/ble_monitor.py` (`log4-ble-play-stop.txt`, 214 frames) came back with **zero disconnects, zero `MANGLED`, zero `ERROR`** for the entire run — every frame checksum-valid. `log3-play-stop.txt`, the equivalent test over USB serial, lost most of that same window to repeated serial disconnects right as the motor engaged; this run had none of that. See "Protocol observations" below for what the clean, gap-free capture revealed about the speed ramp itself.
 
 ## Output
 
@@ -286,5 +288,29 @@ Across the `log1.txt` samples above, only two payload positions changed:
 - payload byte 7 (frame offset 9): `00` / `00` / `01`
 
 Everything else (`A0 00 00 00 00 ... 00 00`) held constant. `log2.txt`'s much longer session (see above) varies the same two positions independently of each other — offset 7's baseline moved to `9E` this session while offset 9's rare `01` variant recurred regardless — and offset 7 has now taken three consecutive values (`0x9E`, `0x9F`, `0xA0`) across the two sessions. These two positions remain the best current lead on which fields carry live console/baseboard state, but this is still an observation from two capture sessions, not a validated field map — treat as a starting point for further capture and correlation (ideally the single-action-at-a-time captures suggested in `NOTES.md`), not as ground truth.
+
+### A linear speed ramp during play -> stop (`log3-play-stop.txt`, `log4-ble-play-stop.txt`)
+
+Two captures of the same real action — press play (startup speed 0.8 km/h), let it run a few seconds, press stop (which ramps down in 0.1 km/h steps) — give the clearest field semantics found so far. `log3-play-stop.txt` (over USB serial) caught only 5 non-idle frames because the serial connection kept dropping out as the motor drew current; `log4-ble-play-stop.txt` (over BLE, see "BLE" above) caught the entire cycle cleanly — 214 frames, zero drops, zero mangled — and both agree with each other everywhere they overlap.
+
+**`CON->BASE` bytes 4:5, read as one big-endian 16-bit value, trace a near-perfect linear ramp:**
+
+```
+0 -> 250 -> 310 -> 387 -> 465 -> 542 -> 620   [held steady for ~33 frames]   -> 542 -> 465 -> 387 -> 310 -> 232 -> 155 -> 77 -> 0
+```
+
+Step size is almost exactly constant both up and down — **~77–78** per step, an 8-step ramp from 0 to 620 and back. That's a ramp generator, not noise.
+
+**`BASE->CON` bytes 3:4 (same big-endian-pair position, one direction over) mirror the identical shape**, plateauing in the same 618–623 range while `CON->BASE`'s sits at 620 — both sides reporting essentially the same underlying setpoint.
+
+**`BASE->CON` byte 8** (the field flagged as the best speed candidate from `log3`'s 3 sparse samples, `0x13/0x15/0x0F` = 19/21/15) now has a full curve behind it in `log4`: `0 -> 10 -> 13 -> 15 -> 18 -> 21 -> 22` rising in lockstep with the ramp above, holding at **21–23** through the plateau, then back down to `0` — roughly proportional to the fine ramp value (ratio ≈ 28), i.e. plausibly a coarser/rounded report of the same quantity. The exact km/h-per-unit conversion isn't pinned down yet — that needs a second capture at a different, precisely-known target speed to compare ratios against this one — but the shape is now unambiguous.
+
+Other bytes during the same window:
+
+- The status byte at frame offset 2 (`A0`/`A1` on `BASE->CON`, `0x20`/`0x21` on `CON->BASE`) toggles during the run/plateau but isn't cleanly pinned to a specific ramp edge yet — clearly "active vs. idle" rather than noise, not yet a validated flag meaning.
+- `BASE->CON` byte 9 fluctuates in a small 0–5 range roughly tracking the ramp phase, but far noisier than the bytes-3:4 ramp — a weaker lead than the ramp field, not yet explained.
+- The `9E`/`9D` "live" byte (frame offset 7, see "Live-looking fields" above) drifts on its own schedule throughout `log4` too, independent of the run/stop cycle — reconfirms it's unrelated background drift, now across three separate sessions.
+
+As with everything in this section: real observations from real captures, not yet a validated field map. The next useful capture would be a second, different target speed to calibrate the ramp's units.
 
 Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
