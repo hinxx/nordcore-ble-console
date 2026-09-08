@@ -36,11 +36,18 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
   any time — the other left fully open. This is the explicit fallback: if the ESP32
   side misbehaves, move the jumper back and the stock console works again immediately,
   no reflashing or rewiring beyond the jumper.
-- **Power**: the stock console does its own 12V → 5V regulation today, and the ESP32
-  needs 5V too. Plan is to tap the console board's existing 5V rail rather than build a
-  separate supply right now. Carry over the existing caution from the root README's
-  "Electrical wiring" section: verify this 5V tap and USB power aren't both driving the
-  ESP32 at once without confirmed power-path isolation, same as during bench sniffing.
+- **Power — decided: dedicated `7805` regulator (TO-220, 2A-rated part on hand), not a
+  tap off the console's own 5V rail.** 12V → 5V, independent of whatever spare current
+  capacity the stock console's own regulator actually has. Standard app-circuit notes:
+  ~0.33µF input / ~0.1µF output decoupling caps close to the regulator's pins, per the
+  classic 7805 datasheet circuit. Heatsinking: dissipation = (12V − 5V) x current: an
+  ESP32 with BLE active typically draws ~80–260mA with bursts higher (WiFi/BT peaks
+  toward ~300–500mA) — ~1.4W at 200mA is fine bare in free air, but a ~500mA burst is
+  ~3W, which a bare TO-220 will run hot on despite the part being rated for 2A: worth a
+  small heatsink or clip-on if those peaks show up regularly. Carry over the existing
+  caution from the root README's "Electrical wiring" section regardless of where the 5V
+  comes from: verify this supply and USB power aren't both driving the ESP32 at once
+  without confirmed power-path isolation, same as during bench sniffing.
 - **TX signal level — decided: discrete single-transistor inverting shifter, not an
   IC.** RX only ever needed a step-down divider (5V → 3.3V). TX is the reverse: the
   ESP32's 3.3V output driving into whatever the baseboard's RX pin actually requires.
