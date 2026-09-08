@@ -6,6 +6,12 @@ sdkconfig.old
 # Project-local downloaded SDK/toolchain
 .tooling/
 
+# Python (tools/ble_monitor.py)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
 # Editor / OS
 .vscode/
 .idea/
