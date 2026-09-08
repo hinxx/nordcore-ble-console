@@ -41,17 +41,29 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
   separate supply right now. Carry over the existing caution from the root README's
   "Electrical wiring" section: verify this 5V tap and USB power aren't both driving the
   ESP32 at once without confirmed power-path isolation, same as during bench sniffing.
-- **TX signal level — candidate part chosen, not yet bench-verified.** RX only ever
-  needed a step-down divider (5V → 3.3V). TX is the reverse: the ESP32's 3.3V output
-  driving into whatever the baseboard's RX pin actually requires. Candidate: a
-  **`74HCT125`** (quad tri-state buffer, DIP-14) — must be the `HCT` family specifically,
-  not plain `HC`: `HCT`'s TTL-compatible input threshold (~1.5–2V) reads a 3.3V input
-  reliably as logic-high, where plain `HC`'s CMOS threshold (~3.5V at 5V supply) would
-  not. Power it from the same 5V rail as the ESP32, one gate's input from the ESP32's TX
-  pin, that gate's `~OE` tied to GND (always enabled), that gate's output to the
-  baseboard's RX line. This is the standard, well-documented approach for a one-
-  directional 3.3V→5V shift, not something verified against this specific baseboard's
-  actual input characteristics yet.
+- **TX signal level — decided: discrete single-transistor inverting shifter, not an
+  IC.** RX only ever needed a step-down divider (5V → 3.3V). TX is the reverse: the
+  ESP32's 3.3V output driving into whatever the baseboard's RX pin actually requires.
+  Chosen circuit (a **BC546**, NPN, on hand — interchangeable with the whole
+  BC546/547/548/549/550 family for this purpose; none of their voltage ratings are
+  remotely stressed switching 5V):
+
+  ```
+  ESP32 TX ---[1k-4.7k]--- base (BC546)
+  GND -------------------- emitter
+  5V ---[4.7k-10k]------- collector ---> to baseboard RX
+  ```
+
+  A saturated common-emitter transistor pulls its collector to within ~0.1–0.2V of
+  GND, and the pull-up resistor takes it to a true, full 5V when off — near rail-to-
+  rail, and simpler than any of the IC or multi-transistor alternatives considered
+  first (a `74HCT125` IC, and a 3-transistor complementary push-pull using BC546 +
+  BC556 + a possible D1616/2SD1616 were both considered and set aside — the push-pull
+  in particular would have given *worse* logic levels here, losing ~0.6V on each rail
+  to emitter-follower Vbe drops, for more parts). **This circuit inverts the signal** —
+  firmware must call `uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV)` on the TX
+  UART to correct it. Not yet bench-verified against the baseboard's actual RX input
+  characteristics.
 
 ### Line-by-line UART plan
 
@@ -173,8 +185,8 @@ speed over time, since the baseboard never reports it.
 
 ## Open questions / not yet resolved
 
-- TX level: `74HCT125` chosen as the candidate level-shifter IC (see Hardware plan
-  above) but not yet bench-verified against this specific baseboard's actual RX input
+- TX level: single-transistor BC546 inverting shifter chosen (see Hardware plan above)
+  but not yet bench-verified against this specific baseboard's actual RX input
   characteristics.
 - Exact real-time cadence of ramp-step updates during an active ramp (only step *sizes*
   are well-established; timing is inferred, not timestamped).
