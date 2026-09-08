@@ -405,4 +405,42 @@ That rules out a simple proportional formula. The reason shows up in the step si
 
 For a quick estimate rather than a table lookup, `CON->BASE`'s value is roughly `750 x speed_km/h` (proportional fit) or `736 x speed_km/h + 58` (affine fit) — both within about ±0.04 km/h through most of the range, worse only right at the very top near the cap.
 
-Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
+### Byte interpretation summary, both directions
+
+Everything above, consolidated. Offsets are 0-indexed from the frame's leading `0x68`. "Known" means a validated field (formula or lookup table); "Partial" means a real, evidenced correlation without a full explanation; "Unknown" means no evidence beyond "this is what's been observed so far."
+
+**`BASE->CON`** (14 bytes when `LEN` = `0x0C`, the only length seen so far):
+
+| Offset | Observed values | Status | What we know |
+|---|---|---|---|
+| 0 | `0x68` | Known | Start byte, fixed |
+| 1 | `0x0C` | Known | Length field: bytes after itself (payload + CS + end) |
+| 2 | `A0` / `A1` | Partial | Status/state flag — toggles active vs. idle-ish, but the exact trigger edge isn't pinned down |
+| 3:4 | big-endian uint16 | **Known** (lookup table, not a closed-form formula) | Measured/actual speed; mirrors `CON->BASE` bytes 4:5 with small real jitter (±1–3 units). See "Full-range calibration" above for the 53-point speed table |
+| 5 | `0x00` always | Unknown | Never seen anything but zero across 5+ sessions — reserved, or an untested field (incline? error state?) |
+| 6 | `0x00`, one exception `0x01` | Unknown | The single `0x01` was the very first frame right as "play" was pressed (`log4`) — n=1, too thin to conclude anything |
+| 7 | `9D` / `9E` / `9F` / `A0` | Partial | Confirmed *unrelated* to run/speed state (drifts on its own schedule across every session) — what it actually represents is still unknown |
+| 8 | correlates with speed | Partial (correlated, no exact formula) | Lagged/filtered actual-speed reading — catches up to the setpoint during a ramp; ratio to bytes 3:4 settles to ~31.3–31.5 once held above ~1.5 km/h; roughly `23.0 x speed_km/h + 3.4` |
+| 9 | `0x00`–`0x06` | Unknown | Weak, noisy correlation with ramp phase — also the source of the rare idle `...00 01 00 00...` variant seen in `log1` |
+| 10 | `0x00` always | Unknown | Never seen anything but zero |
+| 11 | `0x00` always | Unknown | Never seen anything but zero |
+| 12 | derived | Known | Checksum — 8-bit sum of bytes 1–11, mod 256 |
+| 13 | `0x43` | Known | End byte, fixed |
+
+**`CON->BASE`** (10 bytes when `LEN` = `0x08`, the only length seen so far):
+
+| Offset | Observed values | Status | What we know |
+|---|---|---|---|
+| 0 | `0x68` | Known | Start byte, fixed |
+| 1 | `0x08` | Known | Length field |
+| 2 | `0x20` / `0x21` | Partial | Status/state flag, same pattern as `BASE->CON` offset 2 |
+| 3 | `0x00` / `0x50` | **Known-ish** | "Motor commanded on" flag — `0x50` whenever any non-idle speed is commanded (from play through the stop ramp), `0x00` at true idle |
+| 4:5 | big-endian uint16 | **Known** (lookup table, not a closed-form formula) | Commanded speed setpoint — exact, essentially zero jitter once held. Confirmed 0.8 km/h minimum floor and a hard cap at the 6.0 km/h nameplate max (raw value clamps below where the smooth ramp would otherwise land). See "Full-range calibration" above |
+| 6 | `0x00` always | Unknown | Never seen anything but zero |
+| 7 | `0x14` always | Known constant | Fixed in every capture regardless of state — a reserved/marker byte, purpose unknown |
+| 8 | derived | Known | Checksum — 8-bit sum of bytes 1–7, mod 256 |
+| 9 | `0x43` | Known | End byte, fixed |
+
+Every test run so far has only exercised **speed** (play/stop/±0.1 km/h/hold-to-limits). Nothing has touched incline (if this treadmill has it) or any error/fault condition — the always-zero bytes (`BASE->CON` 5/10/11, `CON->BASE` 6) are prime candidates for fields that simply haven't been triggered yet, not necessarily unused.
+
+Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of bytes not covered above — see "Byte interpretation summary" just above, and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
