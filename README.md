@@ -111,6 +111,8 @@ Anything that doesn't parse as a complete, checksum-valid frame is printed as it
 
 This parser (framing, length handling, and checksum validation) was verified by replaying the full `log1.txt` capture byte-for-byte through the same logic: every one of the 53 `BASE->CON` and 66 `CON->BASE` real frames comes back `OK`, and the only `MANGLED` output is the capture's own start/end boundaries — 6 bytes of a frame the capture began mid-way through, and a trailing frame still in progress when the capture ended.
 
+It has also now been confirmed on a real 118-second run of the actual firmware (`log2.txt`, `frame-sniffer v1.0.0`): 1195 `OK` frames (658 `CON->BASE` + 537 `BASE->CON`), every one independently re-checked byte-for-byte against the checksum formula with zero mismatches. Only 2 `ERROR BREAK` lines and 2 `MANGLED stray_bytes` lines appear in the whole capture, all four clustered in the first ~5 seconds while the parser was still syncing to the two lines at boot; the remaining ~113 seconds are 100% clean.
+
 ### Error events
 
 UART framing/parity errors and RX overflow are reported inline as their own lines rather than being silently dropped, so a later analysis doesn't mistake a lossy capture for a complete one:
@@ -158,6 +160,20 @@ Gap between repeats of the *same* payload (i.e. skipping ticks occupied by a dif
 
 For contrast, GPIO26 does **not** run on a fixed period: the same invariant frame (`68 08 20 00 00 00 00 14 3C 43`) either appears in isolation or as a burst of ~6–7 repeats spaced **~9.8–20.8 ms apart** (drifting up to ~40–90 ms toward the end of a burst), with **~1.07–1.25 s** gaps between bursts — consistent with a command being retransmitted by the console rather than a periodic status tick.
 
+### Second session confirms the pattern, and narrows the "live" byte theory (`log2.txt`)
+
+A later, much longer 118-second capture with the current `frame-sniffer` firmware (1195 total frames: 658 `CON->BASE`, 537 `BASE->CON`) reconfirms everything above at higher statistical confidence, and adds one new data point:
+
+- The 220 ms `BASE->CON` tick holds essentially exactly: 527 of 536 gaps are 220 ms on the nose, the rest 213/227 ms.
+- `CON->BASE`'s frame (`68 08 20 00 00 00 00 14 3C 43`) is again **100% invariant** across all 658 occurrences — reinforcing it as a fixed command/ack, not a carrier of live state.
+- `BASE->CON`'s baseline payload value shifted session-to-session: `log1.txt` had `9F` as the dominant value; this session's dominant value is **`9E`** (529 of 537 frames), with `9F` reappearing 5 times and a `9E...01...` variant (analogous to `log1.txt`'s rare `9F...01...` frame) appearing 3 times. Between the two sessions, that byte (frame offset 7) has now taken three *consecutive* values — `0x9E` (158), `0x9F` (159), `0xA0` (160) — which is a stronger hint than a single session gave that this is a drifting counter or live analog/sensor reading rather than a fixed constant; its idle baseline isn't stable across power-on sessions. Not yet a validated field, still just the best current lead (see "Live-looking fields" below).
+
+The only imperfect lines in the whole 118-second capture — 2 `ERROR BREAK` and 2 `MANGLED stray_bytes` — are all within the first ~5 seconds while the parser was still syncing to the lines at boot; see Output above for the full validation result.
+
+### Timestamps compress during catch-up bursts (log2.txt evidence)
+
+`log2.txt` also gives a sharper, more frequent example of the caveat already noted under Output ("software receive time, not wire-arrival time"): dozens of times through the capture — roughly every ~1.3 s, in pairs — two **complete, distinct** `CON->BASE` frames show only **~0.37–0.42 ms** between their timestamps. That's physically impossible on the wire: a 10-byte frame takes ~91.7 ms to transmit at 1200 baud 8N2, so two full frames cannot really start 0.4 ms apart. This is the sniffer task falling behind (e.g. while busy printing the previous line) and then, once scheduled again, draining several frames' worth of already-buffered bytes in a tight loop — each `uart_read_bytes()` call returns near-instantly because the data is already sitting in the ring buffer, so the whole run of already-arrived frames gets timestamped within a fraction of a millisecond of each other, even though their true wire arrival was spread over a much longer real span. Treat any run of unusually tight-packed frame timestamps as this artifact, not as evidence the console actually transmits that fast.
+
 ### The two streams are not synchronized
 
 Cross-referencing frame timestamps between GPIO26 and GPIO27 directly (not just each stream's own stats) shows the two run on independent, free-running clocks:
@@ -203,11 +219,11 @@ No CRC, no carry-fold, no two's-complement — a straightforward 8-bit additive 
 
 ### Live-looking fields
 
-Across the three samples above, only two payload positions changed:
+Across the `log1.txt` samples above, only two payload positions changed:
 
 - payload byte 5 (frame offset 7, right after the four `00`s): `9F` / `A0` / `9F`
 - payload byte 7 (frame offset 9): `00` / `00` / `01`
 
-Everything else (`A0 00 00 00 00 ... 00 00`) held constant. These two positions are the best current lead on which fields carry live console/baseboard state, but this is still an observation from a handful of frames, not a validated field map — treat as a starting point for further capture and correlation, not as ground truth.
+Everything else (`A0 00 00 00 00 ... 00 00`) held constant. `log2.txt`'s much longer session (see above) varies the same two positions independently of each other — offset 7's baseline moved to `9E` this session while offset 9's rare `01` variant recurred regardless — and offset 7 has now taken three consecutive values (`0x9E`, `0x9F`, `0xA0`) across the two sessions. These two positions remain the best current lead on which fields carry live console/baseboard state, but this is still an observation from two capture sessions, not a validated field map — treat as a starting point for further capture and correlation (ideally the single-action-at-a-time captures suggested in `NOTES.md`), not as ground truth.
 
 Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
