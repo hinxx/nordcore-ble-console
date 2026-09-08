@@ -41,12 +41,13 @@ This repo can hold more than one firmware at once, each in its own `fw/<name>/` 
 
 | Firmware | Version | What it does |
 |---|---|---|
-| `fw/frame-sniffer/` (default) | 1.0.0 | Reassembles both directions into complete `68/LEN/payload/CS/43` frames; prints one `OK`/`MANGLED` line per frame, labeled by direction (`BASE->CON`/`CON->BASE`). See Output below. |
+| `fw/frame-sniffer/` (default) | 1.0.0 | Reassembles both directions into complete `68/LEN/payload/CS/43` frames; prints one `OK`/`MANGLED` line per frame, labeled by direction (`BASE->CON`/`CON->BASE`), over USB serial. See Output below. |
 | `fw/byte-sniffer/` | 1.0.0 | The earlier one-line-per-byte firmware this project started from, extracted here so it stays available — useful when you want the rawest possible view (e.g. debugging the framing/checksum logic itself, or a protocol variant the frame parser doesn't recognize). Labels by GPIO (`GPIO26`/`GPIO27`), not direction. |
+| `fw/ble-sniffer/` | 1.0.0 | Same frame parser as `frame-sniffer`, but valid frames go out over a BLE GATT notify characteristic instead of USB serial — see "BLE (`fw/ble-sniffer/`)" below. |
 
-Each firmware's version lives in two places kept in sync by hand: `fw/<name>/version.txt` (which ESP-IDF embeds into the compiled binary's app description — check it later with `esptool.py image_info` or over OTA) and an `FW_VERSION` macro in that firmware's `main.c` (which is what actually gets printed in the serial boot banner). Confirmed by building both and checking the configure-step output: `App "treadmill_frame_sniffer" version: 1.0.0` and `App "treadmill_byte_sniffer" version: 1.0.0`, each independent of the other and of the repo's own git state. Bump a firmware's version in both places together when its behavior changes.
+Each firmware's version lives in two places kept in sync by hand: `fw/<name>/version.txt` (which ESP-IDF embeds into the compiled binary's app description — check it later with `esptool.py image_info` or over OTA) and an `FW_VERSION` macro in that firmware's `main.c` (which is what actually gets printed in the serial boot banner). Confirmed by building all three and checking the configure-step output: `App "treadmill_frame_sniffer" version: 1.0.0`, `App "treadmill_byte_sniffer" version: 1.0.0`, `App "treadmill_ble_sniffer" version: 1.0.0`, each independent of the others and of the repo's own git state. Bump a firmware's version in both places together when its behavior changes.
 
-`./tools/idf.sh` defaults to `frame-sniffer`; pass `-f <name>` (or `--fw <name>`) before the `idf.py` arguments to target a different one, e.g. `./tools/idf.sh -f byte-sniffer build`.
+`./tools/idf.sh` defaults to `frame-sniffer`; pass `-f <name>` (or `--fw <name>`) before the `idf.py` arguments to target a different one, e.g. `./tools/idf.sh -f byte-sniffer build` or `./tools/idf.sh -f ble-sniffer build`.
 
 ## Bootstrap on Ubuntu / Mint / Debian
 
@@ -76,9 +77,69 @@ Find the USB serial port, commonly `/dev/ttyUSB0`, then:
 ```bash
 ./tools/idf.sh -p /dev/ttyUSB0 flash monitor
 ./tools/idf.sh -f byte-sniffer -p /dev/ttyUSB0 flash monitor
+./tools/idf.sh -f ble-sniffer -p /dev/ttyUSB0 flash monitor
 ```
 
 Exit the ESP-IDF monitor with `Ctrl+]`.
+
+## BLE (`fw/ble-sniffer/`)
+
+`fw/frame-sniffer/` and `fw/byte-sniffer/` both stream continuously over USB serial, which means a wired USB connection to a laptop for the whole capture. During a real play/ramp-down test (`log3-play-stop.txt`) the serial monitor dropped out repeatedly for several seconds right as the motor engaged and drew current — `fw/ble-sniffer/` exists to get the sniffer off that USB link entirely: it reuses the exact same frame parser as `fw/frame-sniffer/` (same `68/LEN/payload/CS/43` framing and checksum validation, byte-for-byte identical logic), but valid frames go out over Bluetooth Low Energy instead of a `printf` line.
+
+### Architecture
+
+The ESP32 acts as a **BLE peripheral / GATT server** (NimBLE host, no classic Bluetooth, no Bluedroid), built directly on ESP-IDF's own `bleprph`/`blehr` NimBLE examples rather than written from scratch — `ble_gatts_notify_custom()` is called straight from each `sniffer_task` the moment a frame validates, no polling timer involved:
+
+```text
+ESP32 (peripheral)
+  |
+  +-- GATT service: Treadmill Sniffer   (128-bit UUID, private -- not a registered SIG profile)
+        |
+        +-- characteristic RX_LOG   NOTIFY   one BLE notification per valid treadmill frame
+        |
+        +-- characteristic CMD      WRITE    accepted and logged, not acted on yet
+```
+
+`CMD` exists so the GATT structure is already in place for active control once the protocol is understood (`REQUIREMENTS.md`'s deferred future stages) — writes to it are logged over USB serial and otherwise ignored; nothing is ever transmitted onto either treadmill UART line from this firmware, same guarantee as the other two.
+
+UUIDs (generated once, fixed from here on so a client app doesn't need reconfiguring after a rebuild):
+
+| | Standard UUID string | `BLE_UUID128_INIT` bytes (NimBLE's own byte order — reverse of the string) |
+|---|---|---|
+| Service | `3AAC01E9-30A5-4B5F-9FDE-DC1CC874E6D6` | `d6,e6,74,c8,1c,dc,de,9f,5f,4b,a5,30,e9,01,ac,3a` |
+| RX_LOG | `F02DC604-61E1-4A7C-9413-3F4C5D97C47F` | `7f,c4,97,5d,4c,3f,13,94,7c,4a,e1,61,04,c6,2d,f0` |
+| CMD | `842DEBE9-3D97-49EC-BCD1-590733A4A4D2` | `d2,a4,a4,33,07,59,d1,bc,ec,49,97,3d,e9,eb,2d,84` |
+
+The device advertises as **`TreadmillSniffer`** (flags + name only — a 128-bit UUID wouldn't leave room for a readable name in a 31-byte legacy advertisement; the service is still fully visible via normal GATT discovery once connected).
+
+### RX_LOG notification format
+
+One notification per valid frame, exactly as the original request specified:
+
+```text
+byte 0    direction   (0x01 = BASE->CON, 0x02 = CON->BASE)
+byte 1    length      (total raw frame length)
+byte 2..  the raw frame bytes, unmodified
+```
+
+Example — the idle `BASE->CON` heartbeat frame:
+
+```text
+01 0E 68 0C A0 00 00 00 00 9E 00 00 00 00 4A 43
+```
+
+Currently observed frames (9–14 bytes) fit comfortably inside the default BLE ATT MTU (23 bytes total, 20 usable) without any MTU negotiation. If a future, larger frame variant shows up, a notification carrying it would be truncated to whatever MTU is in effect — not handled yet, since nothing bigger has been observed so far.
+
+Only complete, checksum-valid (`OK`) frames go over BLE. `MANGLED` and `ERROR` (framing/parity/overflow) reporting is unchanged from `frame-sniffer` but stays on USB serial only — those are rare (a handful of lines across a multi-minute capture in `log1.txt`/`log2.txt`), so keeping them on the wired console doesn't reintroduce the continuous-traffic problem BLE is solving, and it means a bench debugging session over USB still sees them. USB serial in this firmware carries only the boot banner, BLE connect/disconnect/subscribe lifecycle lines, and those `MANGLED`/`ERROR` lines — never the continuous per-frame stream.
+
+Like any BLE notification, delivery is best-effort: a frame that arrives with no client connected, or not subscribed, is simply not delivered (not queued, not retried).
+
+### Testing it
+
+Any BLE central can connect, discover the `Treadmill Sniffer` service, and subscribe to `RX_LOG`'s notifications (write `0x01 0x00` to its CCCD, or use your app's "enable notifications" toggle):
+
+- **nRF Connect** (Android/iOS) or **LightBlue** (iOS/macOS) — connect to `TreadmillSniffer`, open the service, tap the notify icon on `RX_LOG`.
+- A simple Python client (e.g. [`bleak`](https://github.com/hbldh/bleak)) on Linux/macOS/Windows, subscribing to the `RX_LOG` characteristic UUID above.
 
 ## Output
 
