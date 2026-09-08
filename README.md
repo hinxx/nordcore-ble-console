@@ -303,7 +303,7 @@ Step size is almost exactly constant both up and down — **~77–78** per step,
 
 **`BASE->CON` bytes 3:4 (same big-endian-pair position, one direction over) mirror the identical shape**, plateauing in the same 618–623 range while `CON->BASE`'s sits at 620 — both sides reporting essentially the same underlying setpoint.
 
-**`BASE->CON` byte 8** (the field flagged as the best speed candidate from `log3`'s 3 sparse samples, `0x13/0x15/0x0F` = 19/21/15) now has a full curve behind it in `log4`: `0 -> 10 -> 13 -> 15 -> 18 -> 21 -> 22` rising in lockstep with the ramp above, holding at **21–23** through the plateau, then back down to `0` — roughly proportional to the fine ramp value (ratio ≈ 28), i.e. plausibly a coarser/rounded report of the same quantity. The exact km/h-per-unit conversion isn't pinned down yet — that needs a second capture at a different, precisely-known target speed to compare ratios against this one — but the shape is now unambiguous.
+**`BASE->CON` byte 8** (the field flagged as the best speed candidate from `log3`'s 3 sparse samples, `0x13/0x15/0x0F` = 19/21/15) now has a full curve behind it in `log4`: `0 -> 10 -> 13 -> 15 -> 18 -> 21 -> 22` rising in lockstep with the ramp above, holding at **21–23** through the plateau, then back down to `0` — roughly proportional to the fine ramp value (ratio ≈ 28), i.e. plausibly a coarser/rounded report of the same quantity. See below (`log5`) for the exact conversion this ramp field turned out to have.
 
 Other bytes during the same window:
 
@@ -311,6 +311,27 @@ Other bytes during the same window:
 - `BASE->CON` byte 9 fluctuates in a small 0–5 range roughly tracking the ramp phase, but far noisier than the bytes-3:4 ramp — a weaker lead than the ramp field, not yet explained.
 - The `9E`/`9D` "live" byte (frame offset 7, see "Live-looking fields" above) drifts on its own schedule throughout `log4` too, independent of the run/stop cycle — reconfirms it's unrelated background drift, now across three separate sessions.
 
-As with everything in this section: real observations from real captures, not yet a validated field map. The next useful capture would be a second, different target speed to calibrate the ramp's units.
+### Speed field calibrated exactly (`log5-ble-play-2x-inc-2x-dec-stop.txt`)
+
+A follow-up capture did exactly what the section above called for: idle -> play (0.8 km/h startup) -> **+0.1 km/h twice** -> wait -> **-0.1 km/h twice** -> stop -> idle, three distinct known target speeds instead of one. 329 frames, independently re-verified, zero checksum mismatches. `CON->BASE` bytes 4:5 (the same big-endian-pair ramp field from `log3`/`log4`) settled into clean, sustained plateaus that line up with the button presses exactly in order:
+
+| Action | `CON->BASE` bytes 4:5 | Frames held | value ÷ 775 |
+|---|---:|---:|---:|
+| play (startup) | `620` (`0x026C`) | 42 | **0.800** |
+| +0.1 | `697` (`0x02B9`) | 13 | **0.899** |
+| +0.1 | `775` (`0x0307`) | 32 | **1.000** |
+| −0.1 | `697` (`0x02B9`) | 18 | **0.899** |
+| −0.1 | `620` (`0x026C`) | 13 | **0.800** |
+| stop | ramps `620 -> 0` | — | **0.000** |
+
+That is exact (to rounding) at all three calibration points against the actual km/h values pressed on the console:
+
+```
+speed_km/h = CON->BASE bytes[4:5] (big-endian uint16, frame offset 5:6) / 775
+```
+
+`BASE->CON`'s mirrored field (bytes 3:4) tracks the same plateaus but with small real jitter — averaged over each plateau: `620.0` / `696.4` / `775.2` (min/max spread ±1–3 units) versus `CON->BASE`'s dead-steady exact values. Read together with `CON->BASE`'s side being rock-solid at each plateau, this looks like a **commanded setpoint** (`CON->BASE`, exact) versus a **measured/actual value** (`BASE->CON`, small real fluctuation) — a sensible split for a motor control loop. `BASE->CON` byte 8 correlates with the same plateaus too but stays coarser and less exact (averages `21.98` / `24.00` / `26.73` across the three speeds, roughly 27–28 units per km/h) — a real but weaker, not-yet-pinned-down secondary field.
+
+This is now the first payload field in this project with a validated formula, not just an observed pattern — though only confirmed across the narrow 0.8–1.0 km/h range tested; extrapolating the `/775` formula to very different speeds (or to incline, if this treadmill has it) is untested.
 
 Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
