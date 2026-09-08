@@ -332,7 +332,7 @@ speed_km/h = CON->BASE bytes[4:5] (big-endian uint16, frame offset 5:6) / 775
 
 `BASE->CON`'s mirrored field (bytes 3:4) tracks the same plateaus but with small real jitter — averaged over each plateau: `620.0` / `696.4` / `775.2` (min/max spread ±1–3 units) versus `CON->BASE`'s dead-steady exact values. Read together with `CON->BASE`'s side being rock-solid at each plateau, this looks like a **commanded setpoint** (`CON->BASE`, exact) versus a **measured/actual value** (`BASE->CON`, small real fluctuation) — a sensible split for a motor control loop. `BASE->CON` byte 8 correlates with the same plateaus too but stays coarser and less exact (averages `21.98` / `24.00` / `26.73` across the three speeds, roughly 27–28 units per km/h) — a real but weaker, not-yet-pinned-down secondary field.
 
-This is now the first payload field in this project with a validated formula, not just an observed pattern — though only confirmed across the narrow 0.8–1.0 km/h range tested here; see below (`log6`, `log7`) for how it holds up across the treadmill's full speed range.
+This is now the first payload field in this project with a validated formula, not just an observed pattern — though only confirmed across the narrow 0.8–1.0 km/h range tested here. **Correction, see `log8` below: `/775` turns out to be only a good approximation in this narrow range, not the true relationship across the treadmill's full speed range.**
 
 ### Confirmed across the full speed range, and a lagged "actual speed" byte (`log6-ble-play-hold-inc-max-speed-hold-dec-stop.txt`)
 
@@ -350,8 +350,59 @@ Same idea as `log6` but with a deliberate pause held at both the top and bottom 
 
 **Confirmed: 0.8 km/h is a real floor.** Holding decrease produces a clean, sustained plateau at `620` (0.8 km/h — the same value as the startup speed) held for 38–40 frames, matching the deliberate wait — *before* a further, separate ramp down to true `0`. `log6` didn't show this because that capture had no equivalent pause. So decrease cannot go below 0.8 km/h on its own; `stop` is a distinct action that finishes the job.
 
-**The max-speed cap doesn't sit exactly on the `/775` line.** The sustained max plateau is `4444` (`0x115C`), held for 58 frames — clearly the intended "wait at max speed." `4444 / 775 = 5.734 km/h`, about 0.27 km/h (4.4%) short of the actual 6.0 km/h nameplate value — too large to be rounding. The likely reason: every ramp step elsewhere in this capture is a consistent ~74–78 units, but the *final* step into the `4444` plateau (from `4389`) is only **55** — noticeably smaller than every other step. That's evidence `4444` is a firmware-enforced ceiling the ramp gets clamped to, not a value that fell out naturally from the same linear stepping the rest of the ramp uses — so it isn't obligated to sit on the same `/775` line the smooth interior of the range does. The `/775` formula itself still looks solid for the range it was actually calibrated against (exact at 0.8/0.9/1.0 km/h); a capture with discrete +0.1 taps up near 5.5–6.0 km/h (`log5`'s technique, not `log6`/`log7`'s continuous hold) would be needed to tell whether the smooth ramp truly extrapolates to 5.73 or to 6.0 right up to the cap.
+**The max-speed cap doesn't sit exactly on the `/775` line.** The sustained max plateau is `4444` (`0x115C`), held for 58 frames — clearly the intended "wait at max speed." `4444 / 775 = 5.734 km/h`, about 0.27 km/h (4.4%) short of the actual 6.0 km/h nameplate value — too large to be rounding. The likely reason: every ramp step elsewhere in this capture is a consistent ~74–78 units, but the *final* step into the `4444` plateau (from `4389`) is only **55** — noticeably smaller than every other step. That's evidence `4444` is a firmware-enforced ceiling the ramp gets clamped to, not a value that fell out naturally from the same linear stepping the rest of the ramp uses. **This turned out to be only half the story — see `log8` below: `/775` isn't exact even in the smooth interior of the range, so the gap here is partly the cap and partly `/775` itself already being an approximation by 6.0 km/h.**
 
 `BASE->CON`'s mirrored field averaged `4443.3` against `CON->BASE`'s exact `4444` at the max plateau — the setpoint/measured split holds right up to the cap. `byte 8` averaged `141.06` there, a ratio of `31.50` — matching `log6`'s settled ~31 ratio once speed has been sustained, reconfirming the lagged-actual-speed hypothesis rather than a fixed proportional field.
+
+### Full-range calibration corrects `/775` (`log8-ble-play-step-inc-to-max-speed.txt`)
+
+The definitive calibration capture: 53 individual `+0.1 km/h` taps from 0.8 up to 6.0 km/h, each held for the console's own ~2-second settling time and matched to what the console display actually showed at every step. 2169 frames, zero checksum mismatches, and every one of the 53 expected speeds produced its own clean, sustained `CON->BASE` plateau (19–23 frames each, consistent with the ~2 s dwell).
+
+**Correction: `/775` is not the true relationship — it was only a good approximation in the narrow range it happened to be calibrated in.** The error against the known speed grows steadily rather than staying flat:
+
+| Speed | `CON->BASE` value | `value / 775` | Error |
+|---:|---:|---:|---:|
+| 0.8 | 620 | 0.800 | 0 |
+| 2.0 | 1536 | 2.000 | ~0 |
+| 4.0 | 3016 | 3.892 | −0.11 km/h |
+| 6.0 | 4444 | 5.734 | **−0.27 km/h** |
+
+That rules out a simple proportional formula. The reason shows up in the step sizes: most `+0.1 km/h` taps step the value up by **74–78 units**, but roughly every 4–6 steps there's a noticeably smaller step, and those smaller steps themselves shrink as speed increases — `73, 71, 69, 67, 65, 63, 61, 59, 56, 55` (that last `55` is the same anomalous final step into the max cap already flagged in `log7`). That's a real, repeating structural pattern, not noise — consistent with this value being a **non-linear transform of speed** (plausibly something tied to motor step *period*, which relates to speed as `1/v` rather than `v`) rather than a straightforwardly linear one. A least-squares line fits much better than `/775` (residuals shrink to within ~0.04 km/h) but still isn't exact, for the same reason.
+
+`BASE->CON` byte 8 behaves better once given time to fully settle (2 s per step here, versus the continuous ramps in `log6`/`log7` where it was still catching up): its ratio to the `CON->BASE` value climbs from ~28 at 0.8 km/h and **stabilizes tightly around 31.3–31.5 for every speed above ~1.5 km/h**. Against speed directly it fits a decent line, `byte8 ≈ 23.0 x speed_km/h + 3.4`.
+
+**Bottom line: there's no clean single formula for this field.** The full 53-point table is now the ground-truth reference for this treadmill's speed range, superseding the `/775` claim above:
+
+| Speed | `CON->BASE` bytes 4:5 | `BASE->CON` byte 8 (avg) | Speed | `CON->BASE` bytes 4:5 | `BASE->CON` byte 8 (avg) |
+|---:|---:|---:|---:|---:|---:|
+| 0.8 | 620 | 21.9 | 3.5 | 2651 | 84.2 |
+| 0.9 | 697 | 23.9 | 3.6 | 2714 | 86.5 |
+| 1.0 | 775 | 26.4 | 3.7 | 2790 | 89.7 |
+| 1.1 | 852 | 28.7 | 3.8 | 2865 | 90.6 |
+| 1.2 | 930 | 31.1 | 3.9 | 2941 | 94.5 |
+| 1.3 | 1003 | 33.4 | 4.0 | 3016 | 95.4 |
+| 1.4 | 1080 | 35.5 | 4.1 | 3092 | 99.1 |
+| 1.5 | 1157 | 38.2 | 4.2 | 3153 | 100.1 |
+| 1.6 | 1234 | 40.4 | 4.3 | 3228 | 103.8 |
+| 1.7 | 1305 | 42.8 | 4.4 | 3303 | 104.8 |
+| 1.8 | 1382 | 44.9 | 4.5 | 3378 | 108.0 |
+| 1.9 | 1459 | 47.5 | 4.6 | 3453 | 110.3 |
+| 2.0 | 1536 | 49.6 | 4.7 | 3528 | 112.4 |
+| 2.1 | 1612 | 52.3 | 4.8 | 3587 | 114.3 |
+| 2.2 | 1681 | 54.0 | 4.9 | 3662 | 116.7 |
+| 2.3 | 1758 | 56.5 | 5.0 | 3736 | 119.2 |
+| 2.4 | 1834 | 59.1 | 5.1 | 3811 | 121.2 |
+| 2.5 | 1911 | 61.2 | 5.2 | 3886 | 124.0 |
+| 2.6 | 1978 | 64.1 | 5.3 | 3961 | 125.9 |
+| 2.7 | 2054 | 65.3 | 5.4 | 4017 | 128.1 |
+| 2.8 | 2130 | 67.9 | 5.5 | 4092 | 130.2 |
+| 2.9 | 2207 | 70.7 | 5.6 | 4166 | 132.8 |
+| 3.0 | 2272 | 72.9 | 5.7 | 4241 | 135.1 |
+| 3.1 | 2348 | 75.6 | 5.8 | 4315 | 137.1 |
+| 3.2 | 2424 | 76.8 | 5.9 | 4389 | 139.5 |
+| 3.3 | 2500 | 79.5 | 6.0 | 4444 (capped) | 141.5 |
+| 3.4 | 2575 | 82.2 | | | |
+
+For a quick estimate rather than a table lookup, `CON->BASE`'s value is roughly `750 x speed_km/h` (proportional fit) or `736 x speed_km/h + 58` (affine fit) — both within about ±0.04 km/h through most of the range, worse only right at the very top near the cap.
 
 Frame reassembly and checksum validation are now implemented in firmware, as described under Output above — this goes beyond `REQUIREMENTS.md`'s originally frozen baseline (§5's "not interpret or modify received bytes", §11's "packet framing and checksum/CRC identification" as a deferred future stage), a deliberate escalation once the frame shape and checksum were confirmed against real hardware capture rather than something assumed upfront. What's still preliminary reverse engineering, not a validated contract, is the *meaning* of the payload bytes — which fields carry speed, incline, state, etc. See "Live-looking fields" above and `REQUIREMENTS.md` for the rest of the frozen baseline intent and future stages.
