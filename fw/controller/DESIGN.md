@@ -41,11 +41,38 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
   separate supply right now. Carry over the existing caution from the root README's
   "Electrical wiring" section: verify this 5V tap and USB power aren't both driving the
   ESP32 at once without confirmed power-path isolation, same as during bench sniffing.
-- **TX signal level — still open.** RX only ever needed a step-down divider (5V → 3.3V).
-  TX is the reverse: the ESP32's 3.3V output driving into whatever the baseboard's RX
-  pin actually requires. Not yet resolved whether 3.3V reads reliably as logic-high
-  there or whether a proper level shifter is needed — treat as unverified, not "probably
-  fine," before wiring it hot.
+- **TX signal level — candidate part chosen, not yet bench-verified.** RX only ever
+  needed a step-down divider (5V → 3.3V). TX is the reverse: the ESP32's 3.3V output
+  driving into whatever the baseboard's RX pin actually requires. Candidate: a
+  **`74HCT125`** (quad tri-state buffer, DIP-14) — must be the `HCT` family specifically,
+  not plain `HC`: `HCT`'s TTL-compatible input threshold (~1.5–2V) reads a 3.3V input
+  reliably as logic-high, where plain `HC`'s CMOS threshold (~3.5V at 5V supply) would
+  not. Power it from the same 5V rail as the ESP32, one gate's input from the ESP32's TX
+  pin, that gate's `~OE` tied to GND (always enabled), that gate's output to the
+  baseboard's RX line. This is the standard, well-documented approach for a one-
+  directional 3.3V→5V shift, not something verified against this specific baseboard's
+  actual input characteristics yet.
+
+### Line-by-line UART plan
+
+Keeping both existing RX taps, not replacing either — the new TX capability is added
+alongside them, sharing a UART peripheral rather than needing a fourth:
+
+- **`UART2` — `BASE->CON`, unchanged.** Stays RX-only, exactly as in `fw/frame-sniffer/`
+  and `fw/ble-sniffer/` today. This is the baseboard's own output; nothing should ever
+  drive TX onto it — that would fight the baseboard's own transmitter.
+- **`UART1` — `CON->BASE`, gains a TX pin alongside its existing RX pin.** The RX tap
+  already on GPIO26 is kept, not dropped, because it's useful in both jumper positions:
+  - Jumper on **ESP32**: UART1's own RX reads back exactly what UART1's TX actually put
+    on the wire — a real hardware confirmation a transmitted frame landed correctly, not
+    just "the code believes it sent it."
+  - Jumper on **stock console**: UART1's RX keeps working exactly like the passive
+    sniffer does today, watching the real console's traffic — useful through bring-up,
+    and for later A/B-comparing the controller's own output against a real session.
+
+  ESP-IDF assigns a UART's RX and TX pins independently via the GPIO matrix, so this is
+  configuration on the existing UART1 peripheral (a new TX-capable GPIO, through the
+  level shifter above), not a new hardware UART instance.
 
 ## What we know (from sniffing) that the controller needs
 
@@ -146,8 +173,9 @@ speed over time, since the baseboard never reports it.
 
 ## Open questions / not yet resolved
 
-- TX level: does the ESP32's 3.3V read reliably as logic-high on the baseboard's RX, or
-  is a level shifter required?
+- TX level: `74HCT125` chosen as the candidate level-shifter IC (see Hardware plan
+  above) but not yet bench-verified against this specific baseboard's actual RX input
+  characteristics.
 - Exact real-time cadence of ramp-step updates during an active ramp (only step *sizes*
   are well-established; timing is inferred, not timestamped).
 - The `0x20`/`0x21` (`CON->BASE`) and `A0`/`A1` (`BASE->CON`) state-byte trigger
