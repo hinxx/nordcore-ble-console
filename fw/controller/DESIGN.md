@@ -56,9 +56,9 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
   remotely stressed switching 5V):
 
   ```
-  ESP32 TX ---[1k-4.7k]--- base (BC546)
-  GND -------------------- emitter
-  5V ---[4.7k-10k]------- collector ---> to baseboard RX
+  ESP32 TX ---[1k-4.7k]--- base (BC546) ---[10k-100k]--- GND
+  GND -------------------------------------- emitter
+  5V ---[4.7k-10k]------------------------ collector ---> to baseboard RX
   ```
 
   A saturated common-emitter transistor pulls its collector to within ~0.1–0.2V of
@@ -67,10 +67,26 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
   first (a `74HCT125` IC, and a 3-transistor complementary push-pull using BC546 +
   BC556 + a possible D1616/2SD1616 were both considered and set aside — the push-pull
   in particular would have given *worse* logic levels here, losing ~0.6V on each rail
-  to emitter-follower Vbe drops, for more parts). **This circuit inverts the signal** —
-  firmware must call `uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV)` on the TX
-  UART to correct it. Not yet bench-verified against the baseboard's actual RX input
-  characteristics.
+  to emitter-follower Vbe drops, for more parts).
+
+  **This circuit inverts the signal — two distinct consequences, not one:**
+  - Steady-state: firmware must call
+    `uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV)` on the TX UART so the two
+    inversions (software, then this transistor) cancel out. Call it early in that
+    UART's bring-up — right after pin/param config — so there's no window where the
+    UART is live but not yet inverted.
+  - Boot-time, before firmware runs at all: at power-on/reset, the GPIO destined to be
+    UART1's TX sits in its reset-default state — for most general-purpose ESP32 pins,
+    a floating, high-impedance input, not a defined logic level. Through the base
+    resistor alone, that leaves the transistor's base undefined during that window, so
+    the line reaching the baseboard isn't guaranteed to sit at correct UART idle-high
+    (mark) either, until firmware takes over. The **base pull-down** in the circuit
+    above (weak relative to the base-drive resistor, so the ESP32 actively driving the
+    pin still wins normally) fixes this: it guarantees the transistor is off — and so
+    the collector output sits at a clean 5V idle-high via the existing pull-up — for
+    the entire boot window, not just after `uart_set_line_inverse()` actually runs.
+
+  Not yet bench-verified against the baseboard's actual RX input characteristics.
 
 ### Line-by-line UART plan
 
