@@ -90,24 +90,18 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
 
 ### Line-by-line UART plan
 
-Keeping both existing RX taps, not replacing either — the new TX capability is added
-alongside them, sharing a UART peripheral rather than needing a fourth:
+Decided: simplify to one plain RX line and one plain TX line — dropping the earlier plan
+to also keep an RX tap on `CON->BASE` (which would have doubled as a self-check loopback
+and a live-console monitor). Traded away deliberately: no hardware confirmation that a
+transmitted frame actually landed on the wire as sent, and no way to passively watch the
+stock console's own traffic while the jumper is set to it — the controller firmware
+becomes control-only on that line, not dual-purpose.
 
 - **`UART2` — `BASE->CON`, unchanged.** Stays RX-only, exactly as in `fw/frame-sniffer/`
   and `fw/ble-sniffer/` today. This is the baseboard's own output; nothing should ever
   drive TX onto it — that would fight the baseboard's own transmitter.
-- **`UART1` — `CON->BASE`, gains a TX pin alongside its existing RX pin.** The RX tap
-  already on GPIO26 is kept, not dropped, because it's useful in both jumper positions:
-  - Jumper on **ESP32**: UART1's own RX reads back exactly what UART1's TX actually put
-    on the wire — a real hardware confirmation a transmitted frame landed correctly, not
-    just "the code believes it sent it."
-  - Jumper on **stock console**: UART1's RX keeps working exactly like the passive
-    sniffer does today, watching the real console's traffic — useful through bring-up,
-    and for later A/B-comparing the controller's own output against a real session.
-
-  ESP-IDF assigns a UART's RX and TX pins independently via the GPIO matrix, so this is
-  configuration on the existing UART1 peripheral (a new TX-capable GPIO, through the
-  level shifter above), not a new hardware UART instance.
+- **`UART1` — `CON->BASE`, TX-only.** No RX pin assigned on this UART at all — just the
+  new TX line, through the level shifter above, to the baseboard's RX (via the jumper).
 
 ## What we know (from sniffing) that the controller needs
 
