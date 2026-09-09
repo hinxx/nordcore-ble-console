@@ -123,6 +123,29 @@ not dual-purpose.
   clustered, easy-to-remember pin layout; GPIO26 itself is intentionally *not* reused
   here, to avoid confusion with its different role (`CON->BASE` RX) on the sniffer rig.
 
+#### Pin table
+
+**Controller rig** (`fw/controller`, this document):
+
+| GPIO | UART | Direction | Signal | Through |
+|---|---|---|---|---|
+| GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | BC546 shifter (see Hardware plan above) |
+| GPIO27 | UART2 | RX (in) | `BASE->CON` (telemetry from baseboard) | 10k/15k divider (same as sniffer rig) |
+| GPIO1 / GPIO3 | UART0 | board default | USB serial console | — |
+
+**Sniffer rig** (`fw/byte-sniffer`, `fw/frame-sniffer`, `fw/ble-sniffer` — unchanged,
+shown here for contrast since both rigs get referenced throughout this doc):
+
+| GPIO | UART | Direction | Signal | Through |
+|---|---|---|---|---|
+| GPIO26 | UART1 | RX (in) | `CON->BASE` (console → baseboard, tapped) | 10k/15k divider |
+| GPIO27 | UART2 | RX (in) | `BASE->CON` (baseboard → console, tapped) | 10k/15k divider |
+| GPIO1 / GPIO3 | UART0 | board default | USB serial console | — |
+
+Note GPIO27's role is identical on both rigs (same signal, same divider) — only GPIO26
+(sniffer RX tap, unused on the controller) and GPIO25 (controller TX, doesn't exist on
+the sniffer) differ.
+
 ## What we know (from sniffing) that the controller needs
 
 Condensed from the root README; see there for the full evidence and caveats.
