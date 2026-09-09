@@ -110,12 +110,18 @@ Traded away deliberately: no hardware confirmation that a transmitted frame actu
 landed on the wire as sent — the controller firmware becomes control-only on that line,
 not dual-purpose.
 
-- **`UART2` — `BASE->CON`, unchanged.** Stays RX-only, exactly as in `fw/frame-sniffer/`
-  and `fw/ble-sniffer/` today. This is the baseboard's own output; nothing should ever
-  drive TX onto it — that would fight the baseboard's own transmitter.
-- **`UART1` — `CON->BASE`, TX-only.** No RX pin assigned on this UART at all — just the
-  new TX line, through the level shifter above, straight to the baseboard's RX (no
-  jumper — see Hardware plan above).
+- **`UART2` — `BASE->CON`, unchanged, GPIO27.** Stays RX-only, exactly as in
+  `fw/frame-sniffer/` and `fw/ble-sniffer/` today. This is the baseboard's own output;
+  nothing should ever drive TX onto it — that would fight the baseboard's own
+  transmitter.
+- **`UART1` — `CON->BASE`, TX-only, GPIO25.** No RX pin assigned on this UART at all —
+  just the new TX line, through the level shifter above, straight to the baseboard's RX
+  (no jumper — see Hardware plan above). GPIO25 chosen as a general-purpose,
+  output-capable pin: not a strapping pin (GPIO0/2/5/12/15, which affect boot mode), not
+  input-only (GPIO34-39, can't do TX at all), and not one of the WROOM-32's reserved
+  integrated-flash pins (GPIO6-11). Sits next to the existing GPIO26/27 pair for a
+  clustered, easy-to-remember pin layout; GPIO26 itself is intentionally *not* reused
+  here, to avoid confusion with its different role (`CON->BASE` RX) on the sniffer rig.
 
 ## What we know (from sniffing) that the controller needs
 
