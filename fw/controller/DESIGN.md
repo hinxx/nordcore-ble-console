@@ -23,19 +23,31 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
 
 ## Hardware plan (per the user's clarification)
 
-- **`BASE->CON` (baseboard's own output) needs no change.** It's already a passive,
-  purely-listen tap (10k/15k divider into a GPIO, per the root README's "Electrical
-  wiring") — the ESP32 can keep listening on it in parallel with anything else on that
-  line indefinitely, no contention, whether or not the stock console is present. No
-  jumper needed here.
-- **`CON->BASE` (commands *to* the baseboard) is the one that needs a physical
-  break-and-jumper.** A UART TX pin is a single push-pull driver; the stock console and
-  the ESP32 cannot both be connected to that line at the same time without contention or
-  driver damage. Plan: break the TX/RX line at the original console, and wire in a
-  jumper so exactly one of {stock console, ESP32} is connected to the baseboard's RX at
-  any time — the other left fully open. This is the explicit fallback: if the ESP32
-  side misbehaves, move the jumper back and the stock console works again immediately,
-  no reflashing or rewiring beyond the jumper.
+**Revised architecture: two separate physical rigs, swapped at the baseboard connector
+as needed — no jumper, and no stock console in the controller circuit at all.**
+
+- **Sniffer rig (existing, unchanged)**: the passive dual RX-only divider circuit
+  already documented in the root README's "Electrical wiring", with its own ESP32,
+  flashed with whichever passive firmware is needed
+  (`fw/byte-sniffer`/`fw/frame-sniffer`/`fw/ble-sniffer`). Kept around exactly as it is
+  today — no changes for the controller work.
+- **Controller rig (new)**: a single dedicated PCB built from the baseboard connector
+  onward — power supply, RX divider, and TX level shifter all on one board (see below),
+  with its own ESP32 running `fw/controller`. This board *is* the console replacement
+  whenever it's connected; the stock console isn't part of this circuit at all.
+- **Fallback, revised**: no jumper anymore — reverting means physically disconnecting
+  whichever rig is currently on the baseboard connector and connecting a different one
+  (stock console, sniffer rig, or controller rig) instead. Same "instant revert, no
+  reflashing" property the jumper plan was aiming for, just done by swapping a
+  connector/board rather than flipping a jumper.
+- **`BASE->CON` (baseboard's own output)**: same passive, purely-listen divider tap as
+  the sniffer rig already uses (10k/15k, per the root README) — reused on the
+  controller PCB, not redesigned. Nothing should ever drive TX onto this line; it's the
+  baseboard's own output.
+- **`CON->BASE` (commands *to* the baseboard)**: the controller PCB's TX line (level
+  shifter below) is the only thing ever connected here while the controller rig is in
+  place — no contention to design around, since the stock console and any other driver
+  are physically disconnected whenever this board is connected.
 - **Power — decided: dedicated `7805` regulator (TO-220, 2A-rated part on hand), not a
   tap off the console's own 5V rail.** 12V → 5V, independent of whatever spare current
   capacity the stock console's own regulator actually has. Standard app-circuit notes:
@@ -92,16 +104,18 @@ through `log11`; the safeguards are the staged rollout and physical fallback bel
 
 Decided: simplify to one plain RX line and one plain TX line — dropping the earlier plan
 to also keep an RX tap on `CON->BASE` (which would have doubled as a self-check loopback
-and a live-console monitor). Traded away deliberately: no hardware confirmation that a
-transmitted frame actually landed on the wire as sent, and no way to passively watch the
-stock console's own traffic while the jumper is set to it — the controller firmware
-becomes control-only on that line, not dual-purpose.
+and, back when a jumper/shared-line design was still in play, a live-console monitor —
+moot now that the controller rig has no stock-console connection to monitor at all).
+Traded away deliberately: no hardware confirmation that a transmitted frame actually
+landed on the wire as sent — the controller firmware becomes control-only on that line,
+not dual-purpose.
 
 - **`UART2` — `BASE->CON`, unchanged.** Stays RX-only, exactly as in `fw/frame-sniffer/`
   and `fw/ble-sniffer/` today. This is the baseboard's own output; nothing should ever
   drive TX onto it — that would fight the baseboard's own transmitter.
 - **`UART1` — `CON->BASE`, TX-only.** No RX pin assigned on this UART at all — just the
-  new TX line, through the level shifter above, to the baseboard's RX (via the jumper).
+  new TX line, through the level shifter above, straight to the baseboard's RX (no
+  jumper — see Hardware plan above).
 
 ## What we know (from sniffing) that the controller needs
 
@@ -164,12 +178,12 @@ Agreed approach: **start by mimicking the original console as closely as possibl
 only diverge (different timing, direct setpoint jumps, etc.) later and deliberately,
 once the faithful-replication baseline is proven solid.
 
-1. **Hardware bring-up.** Install the break-and-jumper on `CON->BASE` only. Confirm the
-   jumper genuinely isolates one driver at a time (no floating line, no contention) with
-   a meter before connecting anything live. Resolve the TX level-shifting question.
-   Confirm the 5V power tap is clean and sufficient before relying on it.
-2. **Heartbeat only, belt unloaded, nobody on it.** Jumper set to ESP32. Transmit
-   *only* the idle frame at the observed burst/gap cadence — no speed commands yet.
+1. **Hardware bring-up.** Build the controller PCB (power supply, RX divider, TX level
+   shifter). Bench-test the board on its own — power rail clean, TX shifter's idle-high
+   output correct — before it's ever connected to the real baseboard.
+2. **Heartbeat only, belt unloaded, nobody on it.** Controller rig connected in place of
+   the stock console. Transmit *only* the idle frame at the observed burst/gap cadence —
+   no speed commands yet.
    Confirm `BASE->CON` keeps reporting normal idle telemetry (matches the idle baseline
    already documented) and nothing faults. This is the first time anything ESP32-
    originated has ever reached the baseboard — treat it as the highest-risk single step
@@ -185,9 +199,9 @@ once the faithful-replication baseline is proven solid.
    behavior is actually wanted (faster ramps, different min/max, BLE command surface
    driving it in real time, etc.).
 
-Keep the jumper physically reachable at every stage — the point of the fallback is that
-reverting to the stock console is a physical action taking seconds, not a firmware
-question.
+Keep the stock console (and/or the sniffer rig) physically at hand at every stage — the
+point of the fallback is that reverting is a physical connector swap taking seconds, not
+a firmware question.
 
 ## BLE console architecture (sketch, not yet implemented)
 
