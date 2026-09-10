@@ -144,6 +144,25 @@ Any BLE central can connect, discover the `Treadmill Sniffer` service, and subsc
 
 **Validated on real hardware**: a full play → run → ramp-down → idle test captured with `tools/ble_monitor.py` (`log4-ble-play-stop.txt`, 214 frames) came back with **zero disconnects, zero `MANGLED`, zero `ERROR`** for the entire run — every frame checksum-valid. `log3-play-stop.txt`, the equivalent test over USB serial, lost most of that same window to repeated serial disconnects right as the motor engaged; this run had none of that. See "Protocol observations" below for what the clean, gap-free capture revealed about the speed ramp itself.
 
+## BLE (`fw/controller/`)
+
+`fw/controller/` advertises as **`TreadmillController`** with a separate GATT service from `fw/ble-sniffer/`'s (different UUIDs, different device name — a BLE central should never confuse the two) exposing:
+
+- `TELEMETRY` (notify) — one record per valid `BASE->CON` frame: format version, raw `CON->BASE`-units speed (big-endian), a tenths-km/h estimate, and the step count. See `fw/controller/main/ble_gatt.h` for the exact byte layout.
+- `CMD` (write) — an app-level command, not the raw wire protocol: `PLAY` (0x01), `STOP` (0x02), or `SET_SPEED` (0x03 + one tenths-km/h byte). The firmware owns ramping, checksums, and timing internally; see `fw/controller/DESIGN.md`'s "BLE console architecture".
+
+`tools/controller.py` — a `bleak`-based Python client, same scan-by-name approach as `tools/ble_monitor.py`. `pip install bleak` then:
+
+```bash
+python3 tools/controller.py                # interactive: live TELEMETRY + a play/stop/speed prompt
+python3 tools/controller.py monitor         # TELEMETRY only, sends nothing
+python3 tools/controller.py play            # one-shot PLAY
+python3 tools/controller.py stop            # one-shot STOP
+python3 tools/controller.py speed 2.5       # one-shot SET_SPEED to 2.5 km/h
+```
+
+Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — the script sends exactly what it's told, whenever it's told, with no safety gating of its own.
+
 ## Output
 
 The firmware reassembles each direction's byte stream into complete `68 LEN ... CS 43` frames (frame shape and checksum are covered under "Protocol observations" below) and emits one line per complete, checksum-valid frame:
