@@ -70,6 +70,17 @@ static const uint16_t SPEED_RAW_TABLE[53] = {
 #define BURST_INNER_GAP_MS    15     /* midpoint of the observed ~9.8-20.8ms intra-burst gap */
 #define BURST_GAP_MS          1150   /* midpoint of the observed ~1.07-1.25s inter-burst gap */
 
+/*
+ * The real console never ramps up from a literal 0 in RAMP_STEP_UNITS
+ * steps -- every real play-test capture on file (logs/log4-ble-play-stop.txt
+ * through logs/log8-ble-play-step-inc-to-max-speed.txt, five independent
+ * sessions) shows the very first non-idle CON->BASE speed value jumping
+ * straight to a fixed 250 (0x00FA) before continuing in ordinary
+ * RAMP_STEP_UNITS-sized steps from there. Mimicked here as the first step
+ * whenever a ramp starts from a full stop.
+ */
+#define INITIAL_ENGAGE_JUMP_RAW  250
+
 static uint16_t speed_tenths_to_raw(uint8_t tenths_km_h)
 {
     if (tenths_km_h < UART_TX_SPEED_MIN_TENTHS) {
@@ -157,10 +168,11 @@ static void send_burst(const uint8_t *frame)
 
 /*
  * Single continuous loop that unifies play/stop/set-speed: it just keeps
- * stepping s_current_raw toward whatever s_target_raw currently is, in
- * RAMP_STEP_UNITS increments, and sends a burst of the resulting frame
- * every cycle. Idle is the degenerate case (target=current=0). This
- * deliberately never jumps straight to a target -- see DESIGN.md's "Ramp
+ * stepping s_current_raw toward whatever s_target_raw currently is (one
+ * INITIAL_ENGAGE_JUMP_RAW-sized first step off a full stop, RAMP_STEP_UNITS
+ * increments thereafter), and sends a burst of the resulting frame every
+ * cycle. Idle is the degenerate case (target=current=0). This deliberately
+ * never jumps straight to the full target -- see DESIGN.md's "Ramp
  * behavior" note: every real speed change observed on the wire was a
  * smooth ramp, and whether the baseboard accepts a direct jump is
  * untested, so this mimics the one behavior actually confirmed safe.
@@ -173,7 +185,13 @@ static void tx_task(void *arg)
         uint16_t target = get_target_raw();
 
         if (s_current_raw < target) {
-            uint16_t next = (uint16_t)(s_current_raw + RAMP_STEP_UNITS);
+            /* See INITIAL_ENGAGE_JUMP_RAW above: a ramp starting from a
+             * full stop takes one big first step, not a RAMP_STEP_UNITS
+             * one, matching every real capture of the console's own
+             * play behavior. */
+            uint16_t next = (s_current_raw == 0)
+                                 ? INITIAL_ENGAGE_JUMP_RAW
+                                 : (uint16_t)(s_current_raw + RAMP_STEP_UNITS);
             s_current_raw = (next > target) ? target : next;
         } else if (s_current_raw > target) {
             s_current_raw = (s_current_raw > RAMP_STEP_UNITS)
