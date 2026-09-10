@@ -66,9 +66,19 @@ static const uint16_t SPEED_RAW_TABLE[53] = {
  * (DESIGN.md "Staged rollout") gives firmer data.
  */
 #define RAMP_STEP_UNITS       76     /* midpoint of the observed ~74-78 range */
-#define BURST_COUNT           6      /* midpoint of the observed ~6-7 idle-heartbeat burst */
-#define BURST_INNER_GAP_MS    15     /* midpoint of the observed ~9.8-20.8ms intra-burst gap */
-#define BURST_GAP_MS          1150   /* midpoint of the observed ~1.07-1.25s inter-burst gap */
+
+/*
+ * Steady one-frame-every-200ms cadence, cursor-measured directly off a real
+ * console's own CON->BASE traffic on a scope (200ms exactly, repeatable) --
+ * replaces an earlier "burst of 6 frames, 15ms apart, then a ~1.15s silent
+ * gap" model that turned out to be a misreading of older byte-level capture
+ * data. That burst-then-silence shape bore no resemblance to this: real
+ * CON->BASE traffic is one frame roughly every 200ms, continuously, much
+ * like BASE->CON's own well-established 220ms heartbeat tick -- not long
+ * silences that could plausibly read as "console went away" to whatever's
+ * on the other end.
+ */
+#define FRAME_PERIOD_MS       200
 
 /*
  * The real console never ramps up from a literal 0 in RAMP_STEP_UNITS
@@ -156,26 +166,16 @@ static void build_frame(uint8_t *out, uint8_t state, uint8_t flag, uint16_t spee
     out[9] = FRAME_END_BYTE;
 }
 
-static void send_burst(const uint8_t *frame)
-{
-    for (int i = 0; i < BURST_COUNT; i++) {
-        uart_write_bytes(TX_UART_NUM, (const char *)frame, FRAME_LEN);
-        if (i + 1 < BURST_COUNT) {
-            vTaskDelay(pdMS_TO_TICKS(BURST_INNER_GAP_MS));
-        }
-    }
-}
-
 /*
  * Single continuous loop that unifies play/stop/set-speed: it just keeps
  * stepping s_current_raw toward whatever s_target_raw currently is (one
  * INITIAL_ENGAGE_JUMP_RAW-sized first step off a full stop, RAMP_STEP_UNITS
- * increments thereafter), and sends a burst of the resulting frame every
- * cycle. Idle is the degenerate case (target=current=0). This deliberately
- * never jumps straight to the full target -- see DESIGN.md's "Ramp
- * behavior" note: every real speed change observed on the wire was a
- * smooth ramp, and whether the baseboard accepts a direct jump is
- * untested, so this mimics the one behavior actually confirmed safe.
+ * increments thereafter), and sends one frame every FRAME_PERIOD_MS. Idle
+ * is the degenerate case (target=current=0). This deliberately never jumps
+ * straight to the full target -- see DESIGN.md's "Ramp behavior" note:
+ * every real speed change observed on the wire was a smooth ramp, and
+ * whether the baseboard accepts a direct jump is untested, so this mimics
+ * the one behavior actually confirmed safe.
  */
 static void tx_task(void *arg)
 {
@@ -207,9 +207,9 @@ static void tx_task(void *arg)
                     holding ? STATE_HOLDING_NONZERO : STATE_IDLE_OR_TRANSITION,
                     engaged ? FLAG_ENGAGED : FLAG_IDLE,
                     s_current_raw);
-        send_burst(frame);
+        uart_write_bytes(TX_UART_NUM, (const char *)frame, FRAME_LEN);
 
-        vTaskDelay(pdMS_TO_TICKS(BURST_GAP_MS));
+        vTaskDelay(pdMS_TO_TICKS(FRAME_PERIOD_MS));
     }
 }
 

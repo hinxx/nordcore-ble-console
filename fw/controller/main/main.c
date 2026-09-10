@@ -13,7 +13,7 @@
  * is what actually gets printed in the serial boot banner below. See
  * fw/frame-sniffer, fw/byte-sniffer, fw/ble-sniffer for the same pattern. */
 #define FW_NAME     "controller"
-#define FW_VERSION  "1.0.1"
+#define FW_VERSION  "1.0.2"
 
 SemaphoreHandle_t g_console_mutex;
 
