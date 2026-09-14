@@ -248,14 +248,12 @@ void uart_tx_start(void)
     ESP_ERROR_CHECK(uart_driver_install(TX_UART_NUM, 256, 0, 0, NULL, 0));
 
     /*
-     * DESIGN.md "TX signal level": the BC546 common-emitter shifter
-     * inverts the signal in hardware. This cancels that inversion in
-     * software so the net polarity reaching the baseboard is correct.
-     * Called immediately after pin/param config, before anything is ever
-     * transmitted, so there's no window where the UART is live but not
-     * yet inverted.
+     * DESIGN.md "TX signal level": TX now goes through a TXB0104 bidirectional
+     * level translator (3.3V ESP32 side -> 5V baseboard side), replacing the
+     * earlier BC546 common-emitter shifter. A translator doesn't invert, so
+     * unlike that BC546 stage, no uart_set_line_inverse() call is needed here
+     * -- the UART's own idle-high output reaches the baseboard unchanged.
      */
-    ESP_ERROR_CHECK(uart_set_line_inverse(TX_UART_NUM, UART_SIGNAL_TXD_INV));
 
     BaseType_t ok = xTaskCreate(tx_task, "con_base_tx", 4096, NULL, 10, NULL);
     if (ok != pdPASS) {
