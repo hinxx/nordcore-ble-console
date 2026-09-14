@@ -40,10 +40,16 @@ as needed — no jumper, and no stock console in the controller circuit at all.*
   (stock console, sniffer rig, or controller rig) instead. Same "instant revert, no
   reflashing" property the jumper plan was aiming for, just done by swapping a
   connector/board rather than flipping a jumper.
-- **`BASE->CON` (baseboard's own output)**: same passive, purely-listen divider tap as
-  the sniffer rig already uses (10k/15k, per the root README) — reused on the
-  controller PCB, not redesigned. Nothing should ever drive TX onto this line; it's the
-  baseboard's own output.
+- **`BASE->CON` (baseboard's own output)**: same passive, purely-listen divider tap the
+  sniffer rig uses, but re-sized to **47k/15k**, not the sniffer rig's 10k/15k.
+  `RX_TX_LEVEL_INVESTIGATION.md` measured the baseboard's real idle-high level at
+  ~13.5V (median) — not the ~5V the original 10k/15k ratio assumed — which put GPIO27
+  at ~8.1–8.7V, above the ESP32's rated 3.3V input. 47k/15k against that same ~13.5V
+  gives ~3.27V, close to a true 3.3V without exceeding it. (Total divider resistance
+  stays a non-issue for 1200 baud either way — nanosecond-scale RC against the GPIO's
+  own input capacitance.) The sniffer rig itself is untouched by this — it's a
+  separate board and out of scope here. Nothing should ever drive TX onto this line;
+  it's the baseboard's own output.
 - **`CON->BASE` (commands *to* the baseboard)**: the controller PCB's TX line (level
   shifter below) is the only thing ever connected here while the controller rig is in
   place — no contention to design around, since the stock console and any other driver
@@ -136,7 +142,7 @@ not dual-purpose.
 | GPIO | UART | Direction | Signal | Through |
 |---|---|---|---|---|
 | GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | 74HCT125 buffer (see Hardware plan above) |
-| GPIO27 | UART2 | RX (in) | `BASE->CON` (telemetry from baseboard) | 10k/15k divider (same as sniffer rig) |
+| GPIO27 | UART2 | RX (in) | `BASE->CON` (telemetry from baseboard) | 47k/15k divider (re-sized from the sniffer rig's 10k/15k — see Hardware plan above) |
 | GPIO1 / GPIO3 | UART0 | board default | USB serial console | — |
 
 **Sniffer rig** (`fw/byte-sniffer`, `fw/frame-sniffer`, `fw/ble-sniffer` — unchanged,
@@ -256,12 +262,12 @@ speed over time, since the baseboard never reports it.
   circuit reached valid-looking TTL levels but the baseboard never responded to it.
   Not yet bench-verified against this baseboard's actual RX input characteristics —
   whether the new circuit actually resolves the non-response is still open.
-- RX divider: the 10k/15k ratio was carried over from the original passive-sniffer
-  rig's 5V-bus assumption, but the baseboard's real `BASE->CON` output was measured at
-  ~13.5V — after this divider, GPIO27 sees ~8.3–8.7V, above the ESP32's rated 3.3V
-  input (apparently survived so far via the GPIO's own clamp diodes, current-limited
-  by the divider's series leg). Not the cause of the current non-response, but a
-  separate thing worth fixing — see `RX_TX_LEVEL_INVESTIGATION.md`.
+- RX divider: resolved — re-sized from the sniffer rig's 10k/15k (a 5V-bus assumption
+  that doesn't hold here) to **47k/15k**, landing GPIO27 around ~3.3V against the
+  baseboard's real ~13.5V output instead of the ~8.3–8.7V the old ratio produced
+  (above the ESP32's rated 3.3V input, apparently survived so far via the GPIO's own
+  clamp diodes). Not yet bench-verified on real hardware; not the cause of the current
+  TX-side non-response either way — see `RX_TX_LEVEL_INVESTIGATION.md`.
 - Exact real-time cadence of ramp-step updates during an active ramp (only step *sizes*
   are well-established; timing is inferred, not timestamped).
 - The `0x20`/`0x21` (`CON->BASE`) and `A0`/`A1` (`BASE->CON`) state-byte trigger
