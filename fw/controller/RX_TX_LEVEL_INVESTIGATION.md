@@ -159,6 +159,91 @@ RX/telemetry **output** signal. That specific theory (and the resulting
 included in the pull-up-removed row above for completeness, but the reasoning
 behind trying it was based on the mislabeled data.
 
+## TXB0104 attempt (tried, and reverted)
+
+Tried as a substitute for the (unavailable at the time) `74HCT125`, since a
+`TXB0104` breakout was already on hand. Wiring was confirmed correct at every
+point checked: `VCCA` on the ESP32's 3.3V rail, `VCCB` measured at 5.01V, `OE`
+tied to `VCCA` (correct — active-high, and this specific breakout also has an
+onboard pull-up to `VCCA` by default), and GND continuity confirmed between
+the `TXB0104` board and the baseboard connector. Ultimately not usable for
+this signal anyway, for a specific, well-understood reason — not a wiring
+mistake.
+
+### What was measured
+
+1. **At the baseboard connector** (the same probe point used for every BC546
+   measurement above): no valid UART framing at all. 130,965 of 131,032
+   samples sat flat "high" (median 4.08V); the rare "low" excursions only
+   reached ~2.2–2.5V, never near 0V.
+2. **Straight off GPIO25** (the `TXB0104`'s A1 input): perfectly clean —
+   `68 08 20 00 00 00 00 14 3C 43` decoding correctly every ~200ms, HIGH
+   median 3.34V, LOW median 0.48V, essentially zero framing errors. This
+   confirmed the firmware/ESP32 side was never the problem.
+3. **Directly at the `TXB0104`'s own B1 pin** (upstream of the board's 220Ω
+   series resistor toward the connector): real toggling activity was present
+   — but compressed to LOW ≈2.09V / HIGH ≈4.16V, and the decoded content was
+   garbage (random bytes, no resemblance to the known frame).
+
+### Diagnosis (corrected after outside review)
+
+The first-pass read on this — "a `TXB0104` can't handle continuous 1200-baud
+UART" — was wrong, and worth retracting explicitly: TI's own materials list
+UART as a supported `TXB0104` application. The actual mechanism, per outside
+review of this document:
+
+- A `TXB0104` drives strongly only briefly around a detected edge, then
+  settles into a deliberately weak (~4kΩ-class) steady-state "keeper" drive —
+  correct behavior for a bidirectional bus like I2C, where nothing should
+  actively fight a driver at rest. TI's own guidance is that any external
+  pull-up/pull-down sharing a line with a `TXB0104` should be well above 50kΩ.
+- The baseboard's `CON->BASE` input turns out to have a real bias of its own —
+  inferred to be in the same few-kΩ range as the `TXB0104`'s weak
+  steady-state drive, given the ~2.1V the two settled at while fighting each
+  other. That's consistent with (not a separate fact from) the ~4.2–4.5V this
+  same input floats to with nothing connected at all (see "Voltage
+  measurements" above) — a moderate, real bias, not a strong pull-up and not
+  genuinely floating either.
+- When the `TXB0104` tries to hold LOW, the baseboard's own bias fights it,
+  and the node settles at a divided ~2.1V instead of a clean low — exactly
+  what was measured. When it holds HIGH, the `TXB0104`'s weak high-drive and
+  the baseboard's bias agree, so HIGH looks comparatively clean (~4.16V).
+- This explains every measurement above at once: edges get through (the
+  `TXB0104`'s brief strong drive does move the line), but the sustained level
+  in between decays back toward wherever the fight between the two biases
+  settles, corrupting bit sampling — real toggling at the chip but garbage
+  content, and an even flatter, more fully-lost signal by the time it reaches
+  the connector through the added 220Ω series resistor (one more attenuating
+  element in the same fight).
+
+**This is a real, useful finding about the baseboard, not just about the
+`TXB0104`**: its RX input carries a moderate bias of its own, likely in the
+low-single-digit-kΩ range — not the near-floating condition a bare
+series-resistor drive from a true push-pull source wouldn't need to fight at
+all. It also retroactively explains why the earlier BC546 pull-up experiments
+(10k → 1.2k → none) never moved the needle much: all of them were fighting
+this same baseboard-side bias with a similarly-weak, comparable-order-of-
+magnitude resistor, so none of them decisively won either.
+
+### Conclusion
+
+Not a wiring mistake — `VCCA`, `VCCB`, `OE`, GND, and the A-side signal were
+all confirmed correct. It's a device-mechanism mismatch: a bidirectional,
+edge-triggered translator built for weakly-biased/high-impedance bus lines
+doesn't hold up against a baseboard input that turns out to have a real (if
+modest) bias of its own. Reverted to the `74HCT125` plan (see `DESIGN.md`'s
+Hardware plan, now including a 220Ω series resistor mirroring the stock
+console's own TX circuit) — a buffer that continuously and unconditionally
+drives both rails doesn't leave anything for the far end to out-fight.
+
+### Suggested confirming experiment (not yet run)
+
+Disconnect B1 from the baseboard connector entirely, leaving the `TXB0104`
+driving only the scope probe with no baseboard load at all. Predicted result:
+LOW near 0V, HIGH near 5V, and clean decoding — which would confirm it's the
+baseboard-side bias, not the `TXB0104` itself, that corrupts the signal once
+reconnected.
+
 ## Open questions for review
 
 1. **Why does the baseboard never respond**, given content, cadence, ground
@@ -170,12 +255,18 @@ behind trying it was based on the mislabeled data.
    actually adequate for this baseboard's real input threshold, or is there a
    plausible failure mode (input capacitance, threshold near VIH_min under
    real loading, slew rate) that a static DC-level analysis wouldn't catch?
-3. Does the BC546 stage need to actively drive the high side (e.g. a
-   complementary push-pull, or a buffer IC like a 74HCT125) rather than rely
-   on any passive pull-up, given the collector voltage barely moved across
-   three very different pull-up conditions (10kΩ, 1.2kΩ, none)? Is that
-   pattern itself evidence of incomplete transistor cutoff / leakage, or
-   something else?
+   Partially explained now — see the `TXB0104` section below: the baseboard's
+   input has a real bias of its own in the low-single-digit-kΩ range, which
+   any passive or weakly-driven "high" (the BC546's pull-up included) has to
+   fight rather than simply needing to clear a static threshold.
+3. **Resolved** (see the `TXB0104` section below): yes, the TX stage needs to
+   actively drive both rails at low impedance. The BC546's near-constant
+   collector voltage across three very different pull-up values, and the
+   `TXB0104`'s LOW settling at ~2.1V instead of near 0V, are both explained by
+   the same fact — the baseboard's `CON->BASE` input has a real bias of its
+   own, comparable in magnitude to a weak resistive pull-up or a translator's
+   weak steady-state drive, so neither ever decisively won. Not incomplete
+   BC546 cutoff after all; a genuine fight between two comparably-weak drives.
 4. Is the RX-side divider's resulting ~8.3–8.7V at GPIO27 something to fix
    independently (it's above the ESP32's rated input range) even though it
    isn't the cause of the current symptom?

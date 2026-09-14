@@ -106,11 +106,35 @@ as needed — no jumper, and no stock console in the controller circuit at all.*
     with no glitch window in between.
   - No OE-pin gating needed as a result — tie the buffer's enable pin permanently
     active per its datasheet polarity.
+  - **Add a ~220Ω series resistor between the buffer's output and the baseboard
+    connector.** This mirrors the stock console's own TX circuit exactly (traced as
+    a bare push-pull MCU output through a single ~220Ω resistor, nothing else) and
+    is cheap insurance now that a real bias/pull-up on the baseboard's input side is
+    confirmed (see the `TXB0104` detour below) — current-limits the buffer's output
+    against whatever that bias actually is, the same role it plays on the original
+    board.
+
+  **A `TXB0104` was tried first and found unsuitable — not a wiring problem, a
+  device-mechanism mismatch.** Its B1 output measurably toggled (edges did get
+  through) but never reached valid rail-to-rail levels — LOW sat around ~2.1V, HIGH
+  around ~4.2V, and decoded content was garbage. Root cause (per outside review): a
+  `TXB0104` drives strongly only briefly around an edge, then settles into a
+  deliberately weak (~4kΩ-class) steady-state "keeper" — a design fit for
+  bidirectional buses like I2C, where nothing should fight a strong driver at rest.
+  TI's own guidance is that any external pull-up/pull-down sharing a `TXB0104` line
+  should be well above 50kΩ. Here, the baseboard's own RX input turned out to have a
+  real bias of its own — in the same few-kΩ ballpark as the `TXB0104`'s weak
+  steady-state drive — so the two fought to a divided ~2.1V instead of a clean LOW.
+  This is itself a useful, new finding about the baseboard, not just about the
+  `TXB0104` — see `RX_TX_LEVEL_INVESTIGATION.md` for the measurements and the full
+  writeup. An IC that drives both rails continuously and unconditionally (this
+  `74HCT125` plan) doesn't have that failure mode: it doesn't ever release the line
+  into a weak state for anything on the far end to overpower.
 
   Not yet bench-verified against the baseboard's actual RX input characteristics —
-  the same caveat the BC546 circuit carried, which turned out to matter. See
-  `RX_TX_LEVEL_INVESTIGATION.md`'s open questions for what's still unknown even after
-  this change.
+  the same caveat the BC546 circuit (and then the `TXB0104`) carried, both of which
+  turned out to matter. See `RX_TX_LEVEL_INVESTIGATION.md`'s open questions for what's
+  still unknown even after this change.
 
 ### Line-by-line UART plan
 
@@ -141,7 +165,7 @@ not dual-purpose.
 
 | GPIO | UART | Direction | Signal | Through |
 |---|---|---|---|---|
-| GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | 74HCT125 buffer (see Hardware plan above) |
+| GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | 74HCT125 buffer + 220Ω series (see Hardware plan above) |
 | GPIO27 | UART2 | RX (in) | `BASE->CON` (telemetry from baseboard) | 47k/15k divider (re-sized from the sniffer rig's 10k/15k — see Hardware plan above) |
 | GPIO1 / GPIO3 | UART0 | board default | USB serial console | — |
 
@@ -257,11 +281,20 @@ speed over time, since the baseboard never reports it.
 
 ## Open questions / not yet resolved
 
-- TX level: switched from a single-transistor BC546 inverting shifter to a `74HCT125`
-  buffer (see Hardware plan above and `RX_TX_LEVEL_INVESTIGATION.md`) after the BC546
-  circuit reached valid-looking TTL levels but the baseboard never responded to it.
-  Not yet bench-verified against this baseboard's actual RX input characteristics —
-  whether the new circuit actually resolves the non-response is still open.
+- TX level: switched from a single-transistor BC546 inverting shifter, through a
+  `TXB0104` (tried and found unsuitable — its weak steady-state drive lost a fight
+  against the baseboard's own input bias, see Hardware plan above), to a `74HCT125`
+  buffer plus a 220Ω series resistor mirroring the stock console's own TX circuit
+  (see Hardware plan above and `RX_TX_LEVEL_INVESTIGATION.md`). Not yet bench-verified
+  against this baseboard's actual RX input characteristics — whether this circuit
+  actually resolves the non-response is still open.
+- The baseboard's `CON->BASE` (RX) input has a real bias/pull-up of its own, in the
+  same few-kΩ range as the `TXB0104`'s weak steady-state drive (inferred from the
+  ~2.1V the two settled at when fighting each other, and consistent with the ~4.2–4.5V
+  it floats to when nothing drives it at all — see `RX_TX_LEVEL_INVESTIGATION.md`).
+  Its exact value is still unknown; a continuously-driving buffer with a low output
+  impedance (the `74HCT125`) shouldn't need to know it, but it's worth keeping in mind
+  if the new circuit is ever found marginal too.
 - RX divider: resolved — re-sized from the sniffer rig's 10k/15k (a 5V-bus assumption
   that doesn't hold here) to **47k/15k**, landing GPIO27 around ~3.3V against the
   baseboard's real ~13.5V output instead of the ~8.3–8.7V the old ratio produced
