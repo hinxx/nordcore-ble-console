@@ -60,45 +60,51 @@ as needed — no jumper, and no stock console in the controller circuit at all.*
   caution from the root README's "Electrical wiring" section regardless of where the 5V
   comes from: verify this supply and USB power aren't both driving the ESP32 at once
   without confirmed power-path isolation, same as during bench sniffing.
-- **TX signal level — decided: discrete single-transistor inverting shifter, not an
-  IC.** RX only ever needed a step-down divider (5V → 3.3V). TX is the reverse: the
-  ESP32's 3.3V output driving into whatever the baseboard's RX pin actually requires.
-  Chosen circuit (a **BC546**, NPN, on hand — interchangeable with the whole
-  BC546/547/548/549/550 family for this purpose; none of their voltage ratings are
-  remotely stressed switching 5V):
+- **TX signal level — revised: `74HCT125` buffer IC, replacing the earlier
+  single-transistor BC546 shifter.** The BC546 common-emitter approach (a saturated
+  transistor pulling the collector near GND, a resistor pulling it up to 5V when off)
+  produced electrically valid-looking TTL levels but the baseboard never responded to
+  anything sent through it — see `RX_TX_LEVEL_INVESTIGATION.md` for the full
+  investigation. The telling clue: the collector's idle-high level barely moved across
+  three very different pull-up strengths (10k, 1.2k, and none at all) — consistent
+  with the transistor never reaching a clean cutoff, or with a passive pull-up simply
+  not being a firm enough "high" assertion, rather than anything a resistor value
+  could fix. That's what motivates dropping the passive-pull-up approach entirely
+  in favor of an IC that actively drives both rails.
 
-  ```
-  ESP32 TX ---[1k-4.7k]--- base (BC546) ---[10k-100k]--- GND
-  GND -------------------------------------- emitter
-  5V ---[4.7k-10k]------------------------ collector ---> to baseboard RX
-  ```
+  New circuit: ESP32 TX (GPIO25) into one channel of a `74HCT125` quad buffer,
+  straight through to the baseboard's RX pin. No shifting needed on the input side —
+  HCT-family inputs are TTL-threshold-compatible, so they read a 3.3V CMOS input
+  correctly despite the IC itself running from 5V. The output side (from the 5V rail)
+  actively drives a true 5V high and a true 0V low directly — no pull-up, no
+  transistor, no base resistor network anywhere in this signal path.
 
-  A saturated common-emitter transistor pulls its collector to within ~0.1–0.2V of
-  GND, and the pull-up resistor takes it to a true, full 5V when off — near rail-to-
-  rail, and simpler than any of the IC or multi-transistor alternatives considered
-  first (a `74HCT125` IC, and a 3-transistor complementary push-pull using BC546 +
-  BC556 + a possible D1616/2SD1616 were both considered and set aside — the push-pull
-  in particular would have given *worse* logic levels here, losing ~0.6V on each rail
-  to emitter-follower Vbe drops, for more parts).
+  **Unlike the BC546 stage, a plain buffer doesn't invert the signal** — so
+  `uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV)` goes away entirely from
+  `uart_tx_start()`. There's no inversion left anywhere in the path to cancel out.
 
-  **This circuit inverts the signal — two distinct consequences, not one:**
-  - Steady-state: firmware must call
-    `uart_set_line_inverse(uart_num, UART_SIGNAL_TXD_INV)` on the TX UART so the two
-    inversions (software, then this transistor) cancel out. Call it early in that
-    UART's bring-up — right after pin/param config — so there's no window where the
-    UART is live but not yet inverted.
-  - Boot-time, before firmware runs at all: at power-on/reset, the GPIO destined to be
-    UART1's TX sits in its reset-default state — for most general-purpose ESP32 pins,
-    a floating, high-impedance input, not a defined logic level. Through the base
-    resistor alone, that leaves the transistor's base undefined during that window, so
-    the line reaching the baseboard isn't guaranteed to sit at correct UART idle-high
-    (mark) either, until firmware takes over. The **base pull-down** in the circuit
-    above (weak relative to the base-drive resistor, so the ESP32 actively driving the
-    pin still wins normally) fixes this: it guarantees the transistor is off — and so
-    the collector output sits at a clean 5V idle-high via the existing pull-up — for
-    the entire boot window, not just after `uart_set_line_inverse()` actually runs.
+  **Boot-safety, revised for this IC.** The BC546 circuit's base pull-down guaranteed
+  a defined off-state (and so idle-high) for free during boot, before firmware ever
+  runs. A CMOS/HCT buffer needs a different answer: a floating (Hi-Z) input into a
+  CMOS gate is not safe on its own — it can sit at an indeterminate voltage, making
+  the input stage draw excess current with an unpredictable, possibly-oscillating
+  output. Fix: a pull-up resistor (10k) from GPIO25 — the `74HCT125`'s input pin — up
+  to 3.3V.
+  - At reset, before firmware runs: GPIO25 is Hi-Z (its normal power-on state; it's
+    not a strapping pin), so the pull-up holds the buffer's input at a defined HIGH,
+    and its output is HIGH — idle-high on the baseboard line from the very first
+    instant, with no firmware involved at all.
+  - Once firmware configures GPIO25 as UART1 TX, UART idle state is high by
+    definition ("mark") — so the handoff from "pulled high by the resistor" to
+    "driven high by the UART peripheral" is seamless, same logic level throughout,
+    with no glitch window in between.
+  - No OE-pin gating needed as a result — tie the buffer's enable pin permanently
+    active per its datasheet polarity.
 
-  Not yet bench-verified against the baseboard's actual RX input characteristics.
+  Not yet bench-verified against the baseboard's actual RX input characteristics —
+  the same caveat the BC546 circuit carried, which turned out to matter. See
+  `RX_TX_LEVEL_INVESTIGATION.md`'s open questions for what's still unknown even after
+  this change.
 
 ### Line-by-line UART plan
 
@@ -129,7 +135,7 @@ not dual-purpose.
 
 | GPIO | UART | Direction | Signal | Through |
 |---|---|---|---|---|
-| GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | BC546 shifter (see Hardware plan above) |
+| GPIO25 | UART1 | TX (out) | `CON->BASE` (commands to baseboard) | 74HCT125 buffer (see Hardware plan above) |
 | GPIO27 | UART2 | RX (in) | `BASE->CON` (telemetry from baseboard) | 10k/15k divider (same as sniffer rig) |
 | GPIO1 / GPIO3 | UART0 | board default | USB serial console | — |
 
@@ -245,9 +251,17 @@ speed over time, since the baseboard never reports it.
 
 ## Open questions / not yet resolved
 
-- TX level: single-transistor BC546 inverting shifter chosen (see Hardware plan above)
-  but not yet bench-verified against this specific baseboard's actual RX input
-  characteristics.
+- TX level: switched from a single-transistor BC546 inverting shifter to a `74HCT125`
+  buffer (see Hardware plan above and `RX_TX_LEVEL_INVESTIGATION.md`) after the BC546
+  circuit reached valid-looking TTL levels but the baseboard never responded to it.
+  Not yet bench-verified against this baseboard's actual RX input characteristics —
+  whether the new circuit actually resolves the non-response is still open.
+- RX divider: the 10k/15k ratio was carried over from the original passive-sniffer
+  rig's 5V-bus assumption, but the baseboard's real `BASE->CON` output was measured at
+  ~13.5V — after this divider, GPIO27 sees ~8.3–8.7V, above the ESP32's rated 3.3V
+  input (apparently survived so far via the GPIO's own clamp diodes, current-limited
+  by the divider's series leg). Not the cause of the current non-response, but a
+  separate thing worth fixing — see `RX_TX_LEVEL_INVESTIGATION.md`.
 - Exact real-time cadence of ramp-step updates during an active ramp (only step *sizes*
   are well-established; timing is inferred, not timestamped).
 - The `0x20`/`0x21` (`CON->BASE`) and `A0`/`A1` (`BASE->CON`) state-byte trigger
