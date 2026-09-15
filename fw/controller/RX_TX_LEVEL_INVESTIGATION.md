@@ -236,13 +236,37 @@ Hardware plan, now including a 220Ω series resistor mirroring the stock
 console's own TX circuit) — a buffer that continuously and unconditionally
 drives both rails doesn't leave anything for the far end to out-fight.
 
-### Suggested confirming experiment (not yet run)
+### Confirming experiment — run, and conclusive
 
-Disconnect B1 from the baseboard connector entirely, leaving the `TXB0104`
-driving only the scope probe with no baseboard load at all. Predicted result:
-LOW near 0V, HIGH near 5V, and clean decoding — which would confirm it's the
-baseboard-side bias, not the `TXB0104` itself, that corrupts the signal once
-reconnected.
+The suggested experiment above was run: with B1 floating (disconnected from
+the baseboard, driving only the scope probe), the signal was a clean, proper
+0V–5V rail-to-rail swing, as predicted. Confirms the `TXB0104` itself drives
+cleanly with nothing to fight.
+
+Follow-up series-resistor sweep between B1 and the baseboard connector (real
+functional test each time — actual PLAY/SET_SPEED/STOP commands over BLE,
+`BASE->CON` telemetry watched live, belt watched directly):
+
+| Series resistance (B1 → connector) | TX LOW | TX HIGH | Content | Belt moved? |
+|---|---:|---:|---|---|
+| B1 floating (no baseboard connected) | ~0V | ~5V | clean | n/a |
+| Direct ESP32 GPIO (no `TXB0104`), 1kΩ series | 2.47V | 3.72V | garbled | No |
+| `TXB0104` B1, **0Ω** (direct wire, no added resistance) | 2.39V | 4.10V | garbled | No |
+
+**The 0Ω result is the conclusive one.** With B1 wired directly to the
+connector, the only series impedance in the circuit is the `TXB0104`'s own
+internal output impedance — and it still lost the fight against the
+baseboard's bias, landing at the same compressed, garbled signal as every
+higher-resistance attempt. Since 0Ω is the floor for reducing series
+resistance, no resistor value between B1 and the connector can fix this: any
+added resistance only makes the fight worse, never better. This closes out
+the `TXB0104` as a viable option for this line, definitively rather than
+provisionally — it isn't a matter of finding the right series resistor, the
+chip's steady-state drive itself is too weak for this specific baseboard,
+full stop. The `74HCT125` plan (continuous, unconditional low-impedance drive
+on both rails, not an edge-triggered weak keeper) is the fix; series-resistor
+tuning is only meaningful once paired with a driver strong enough to be worth
+tuning against in the first place.
 
 ## Open questions for review
 
