@@ -47,6 +47,11 @@ electrical layer alone can't reveal.
   additional pins, so there's no separate discrete presence-detection line
   to account for; whatever the baseboard needs, it has to come through one of
   these four.
+- **TX/RX synchronization.** See "TX/RX synchronization" below: rigorously
+  re-tested with precise simultaneous timestamps (not the older, less
+  reliable byte-sniffer logs) — the two directions run on independent,
+  freely-drifting clocks with no phase relationship at all, on the real
+  console. The clone's own firmware already behaves the same way.
 - **Frame content.** `fw/controller`'s `uart_tx.c` transmits
   `68 08 21 50 00 FA 00 14 87 43` as the first non-idle frame after PLAY —
   confirmed against a live scope capture of the clone (not just the historical
@@ -420,6 +425,51 @@ This was expected, since the clone's own firmware behavior was already known
 (`uart_tx.c` starts transmitting idle immediately in `app_main`), but it
 closes off the possibility that the clone's *own* boot sequence looks
 different from the console's in some way this document hadn't checked yet.
+
+## TX/RX synchronization (tested, no correlation found)
+
+Raised directly: does the baseboard expect `CON->BASE` commands at some
+fixed timing relationship to its own `BASE->CON` heartbeat — a
+request/response or phase-locked pattern — rather than each side just
+running on its own clock? The root README already claimed the two streams
+are independent, but that claim came from the same older byte-sniffer logs
+that also got the burst-timing wrong elsewhere in this project (corrected in
+`uart_tx.c`'s cadence fix), so it was worth re-testing rigorously rather than
+trusting it by inheritance.
+
+### Method
+
+Used an existing simultaneous TX+RX capture of the real stock console
+(precise, scope-timestamped samples, not the older byte-level logs) to
+extract every frame's start time on both wires, then computed each TX frame
+start's offset from the nearest preceding RX frame start, across 27 TX
+frames and 22 RX frames.
+
+### Result
+
+- TX interval: a rock-steady **179.2ms**, every single cycle.
+- RX interval: a rock-steady **220.2ms**, every single cycle.
+- The TX-to-nearest-preceding-RX offset does **not** hold constant — it
+  drifts steadily downward (~41ms per cycle, exactly `220.2ms - 179.2ms`)
+  and wraps around by a full RX period each time it would go negative:
+  `0.066 → 0.025 → (wrap) → 0.205 → 0.164 → 0.123 → 0.082 → 0.041 → (wrap) →
+  0.220 → 0.179 → ...`
+
+This is the textbook beat pattern of two clocks running independently at
+different, stable rates — not a request/response or phase-locked
+relationship. If TX were triggered by, or timed relative to, incoming RX
+frames, this offset would stay fixed instead of walking continuously through
+the full cycle.
+
+### What this means for the clone
+
+`fw/controller`'s own `uart_tx.c` already behaves the same way: `tx_task`
+runs on its own independent `vTaskDelay(FRAME_PERIOD_MS)` loop and never
+references incoming `BASE->CON` frames at all — free-running, exactly like
+the real console. So this isn't a difference between the two: both are
+genuinely independent, and the clone already matches that property
+correctly. Ruled out as an explanation for the non-response, with much
+stronger confidence than the inherited README claim carried on its own.
 
 ## Open questions for review
 
