@@ -35,7 +35,18 @@ electrical layer alone can't reveal.
   the whole system power-cycled well over a hundred times across this
   investigation (every time a wire was touched or a console swapped). If the
   baseboard needed to see the clone attached from cold power-on to "pair," it
-  has had ample opportunity to.
+  has had ample opportunity to. Separately, hot-swapping the clone out for the
+  stock console on an *already-running* baseboard (no power cycle at all)
+  worked immediately — ruling out any baseboard-side cold-boot requirement
+  specifically. A dedicated capture of the stock console's own power-cycle
+  (see "Power-cycle / handshake hypothesis" below) found no special
+  introduction packet on either wire either — see that section for the full
+  story.
+- **A separate "console present" wire.** Confirmed directly: exactly four
+  wires run between the console and the baseboard — 12V, GND, RX, TX. No
+  additional pins, so there's no separate discrete presence-detection line
+  to account for; whatever the baseboard needs, it has to come through one of
+  these four.
 - **Frame content.** `fw/controller`'s `uart_tx.c` transmits
   `68 08 21 50 00 FA 00 14 87 43` as the first non-idle frame after PLAY —
   confirmed against a live scope capture of the clone (not just the historical
@@ -335,6 +346,62 @@ voltage levels — has now been tested to a clean, working signal, and the
 baseboard still does not react at all. Whatever is actually blocking this has
 to be something the electrical layer alone can't reveal.
 
+## Power-cycle / handshake hypothesis (tested, not confirmed)
+
+With clean TX signal quality established (previous section), one live
+observation reopened the question of *when* the baseboard listens rather than
+*what* it's sent: hot-swapping the clone out for the stock console on an
+already-running, powered baseboard worked immediately — no baseboard cold
+boot required. That ruled out a baseboard-side "needs to see a console from
+its own power-on" requirement, but raised a narrower one: maybe the
+**console's own** power-up moment is what matters — some introduction/
+handshake frame it sends once, right as it boots, that the baseboard uses to
+recognize a session before trusting anything else from it. Every capture in
+this document up to this point had only ever recorded steady-state traffic,
+never a console's actual first instant of being powered.
+
+### Experiment
+
+Scope armed continuously (`:RUN`, wide window) before a full power cycle of
+the whole system with the stock console attached throughout, so its own
+boot-up would be captured start to finish. First attempt used a 30s window
+and missed the event entirely — both channels showed nothing but ordinary
+steady-state idle traffic from the start of the window, meaning the real-world
+delay between powering on, observing it, and confirming "done" exceeded the
+window. Re-armed with 90s and re-ran the power cycle; this time the actual
+power-off/on transition landed inside the capture (confirmed independently by
+a per-second standard-deviation scan across the acquired memory, which found
+a sharp drop from ~1.7 to ~0.05 right where the gap was) rather than by luck
+of the window size.
+
+### Result
+
+Both wires show a genuine ~2.2 second gap (TX: no decodable start bit at all;
+RX: noisy/garbled samples consistent with real electrical transient during
+the power interruption, not valid data) — confirming this really is the
+power-off/on moment, not a decode artifact. Immediately afterward, **both
+resume with completely ordinary idle content**:
+
+- TX: `68 08 20 00 00 00 00 14 3C 43` — the same idle frame as every other
+  capture in this document.
+- RX: `68 0C A0 00 00 00 00 ...` — the same idle heartbeat shape as always.
+
+No distinct handshake frame, no unusual byte pattern, no content difference
+from steady-state idle traffic at all.
+
+### What this does and doesn't settle
+
+Doesn't confirm the "special packet at boot" hypothesis — there isn't one, at
+least not visible on the two wires this document has instrumented throughout.
+It also doesn't rule out some other console-side presence signal, except that
+a separate physical wire has now been ruled out directly: the console-to-
+baseboard connector carries exactly four wires (12V, GND, RX, TX), confirmed
+directly, so there's no discrete "presence" line to account for either. If
+the baseboard does have some way of distinguishing "a real console is here"
+from "nothing/something else is here," it isn't visible in the UART content,
+its timing, or a fifth wire — which are the three things this document knows
+how to check from the outside.
+
 ## Open questions for review
 
 1. **This is now the central question, with the electrical explanation
@@ -343,9 +410,14 @@ to be something the electrical layer alone can't reveal.
    cadence, ground reference, and TX voltage levels are not just "within
    threshold" but empirically clean — captured mid-ramp, decrementing by
    exactly the firmware's own step size, 467 bytes with only 2 framing
-   errors at the capture boundary? What test would distinguish "signal is
-   electrically fine but not being sampled correctly" from "something
-   non-electrical is different"? This document has no answer yet.
+   errors at the capture boundary? A console-side power-up handshake was also
+   tested directly (see "Power-cycle / handshake hypothesis" above) and found
+   nothing — both wires resume with completely ordinary idle content after a
+   real, confirmed power-on transition, and the connector has been confirmed
+   to carry only 4 wires (12V/GND/RX/TX), ruling out a separate presence-
+   detect line too. What test would distinguish "signal is electrically fine
+   but not being sampled correctly" from "something non-electrical is
+   different"? This document has no answer yet.
 2. **Resolved** — see the `74AHCT125` section: the clone's TX levels are
    adequate once actively driven at low impedance through a small enough
    series resistor (220Ω, matching the stock console). The earlier ~4.0–4.3V
