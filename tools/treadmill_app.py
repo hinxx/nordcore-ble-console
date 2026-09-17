@@ -65,6 +65,10 @@ SCAN_TIMEOUT_S = 15.0
 
 DB_PATH = Path(__file__).with_name("treadmill_history.db")
 
+# HistoryDB.settings keys for ControlTab's persisted preferences.
+SETTING_PLAY_SPEED_KM_H = "play_speed_km_h"
+SETTING_AUTO_STOP_S = "auto_stop_s"
+
 # When integrating speed over time to estimate distance, skip any gap
 # between consecutive samples bigger than this -- a pause, a disconnect, a
 # day boundary -- not actual walking. Comfortably above the real ~200-220ms
@@ -103,12 +107,32 @@ class HistoryDB:
             """
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts)")
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
         self.conn.commit()
 
     def add_sample(self, ts: float, speed_tenths: int, step_delta: int) -> None:
         self.conn.execute(
             "INSERT INTO samples (ts, speed_tenths, step_delta) VALUES (?, ?, ?)",
             (ts, speed_tenths, step_delta),
+        )
+        self.conn.commit()
+
+    def get_setting(self, key: str, default: str) -> str:
+        row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row is not None else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
         )
         self.conn.commit()
 
@@ -284,8 +308,9 @@ class ControlTab:
     AUTO_STOP_CHECK_MS = 500
     DEFAULT_AUTO_STOP_S = 10.0
 
-    def __init__(self, notebook: ttk.Notebook, worker: BLEWorker):
+    def __init__(self, notebook: ttk.Notebook, worker: BLEWorker, db: HistoryDB):
         self.worker = worker
+        self.db = db
         self.connected = False
         self.running = False
         self.target_tenths = SPEED_MIN_TENTHS
@@ -328,22 +353,37 @@ class ControlTab:
         play_speed_frame = ttk.Frame(self.frame)
         play_speed_frame.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(play_speed_frame, text="Play ramps up to:").pack(side="left")
-        self.play_speed_var = tk.StringVar(value=f"{SPEED_MIN_TENTHS / 10:.1f}")
+        default_play_speed = f"{SPEED_MIN_TENTHS / 10:.1f}"
+        self.play_speed_var = tk.StringVar(
+            value=self.db.get_setting(SETTING_PLAY_SPEED_KM_H, default_play_speed)
+        )
         ttk.Spinbox(
             play_speed_frame, from_=SPEED_MIN_TENTHS / 10, to=SPEED_MAX_TENTHS / 10,
             increment=0.1, width=5, format="%.1f", textvariable=self.play_speed_var,
         ).pack(side="left", padx=(6, 4))
         ttk.Label(play_speed_frame, text="km/h").pack(side="left")
+        # Persisted immediately on every edit (typed or via the spin arrows)
+        # so both settings are already loaded next time the app starts --
+        # no separate Save action to remember.
+        self.play_speed_var.trace_add(
+            "write", lambda *_: self.db.set_setting(SETTING_PLAY_SPEED_KM_H, self.play_speed_var.get())
+        )
 
         auto_stop_frame = ttk.Frame(self.frame)
         auto_stop_frame.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(auto_stop_frame, text="Auto-stop if no steps for:").pack(side="left")
-        self.auto_stop_var = tk.StringVar(value=str(int(self.DEFAULT_AUTO_STOP_S)))
+        default_auto_stop = str(int(self.DEFAULT_AUTO_STOP_S))
+        self.auto_stop_var = tk.StringVar(
+            value=self.db.get_setting(SETTING_AUTO_STOP_S, default_auto_stop)
+        )
         ttk.Spinbox(
             auto_stop_frame, from_=1, to=300, increment=1, width=5,
             textvariable=self.auto_stop_var,
         ).pack(side="left", padx=(6, 4))
         ttk.Label(auto_stop_frame, text="seconds").pack(side="left")
+        self.auto_stop_var.trace_add(
+            "write", lambda *_: self.db.set_setting(SETTING_AUTO_STOP_S, self.auto_stop_var.get())
+        )
 
         self._set_controls_enabled(connected=False, running=False)
         self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
@@ -526,7 +566,7 @@ class App:
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
 
-        self.control_tab = ControlTab(notebook, self.worker)
+        self.control_tab = ControlTab(notebook, self.worker, self.db)
         self.history_tab = HistoryTab(notebook, self.db)
         notebook.add(self.control_tab.frame, text="Control")
         notebook.add(self.history_tab.frame, text="History")
