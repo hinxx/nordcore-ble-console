@@ -278,13 +278,22 @@ class BLEWorker:
 class ControlTab:
     """Play/Stop/Speed Up/Down + live telemetry -- same layout and logic as
     controller_ui.py's App, just living in a Notebook tab instead of owning
-    the whole window."""
+    the whole window. Adds an auto-stop safety watchdog controller_ui.py
+    doesn't have: PLAY starts the belt rolling even if nobody steps on it,
+    so if the reported step count hasn't changed for AUTO_STOP_CHECK_MS-
+    granularity intervals covering the configured timeout, this sends STOP
+    on its own."""
+
+    AUTO_STOP_CHECK_MS = 500
+    DEFAULT_AUTO_STOP_S = 10.0
 
     def __init__(self, notebook: ttk.Notebook, worker: BLEWorker):
         self.worker = worker
         self.connected = False
         self.running = False
         self.target_tenths = SPEED_MIN_TENTHS
+        self._last_seen_steps: int | None = None
+        self._last_step_change_time = time.monotonic()
 
         self.frame = ttk.Frame(notebook)
         pad = {"padx": 10, "pady": 6}
@@ -319,7 +328,18 @@ class ControlTab:
         self.reconnect_btn = ttk.Button(self.frame, text="Reconnect", command=self._on_reconnect)
         self.reconnect_btn.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
 
+        auto_stop_frame = ttk.Frame(self.frame)
+        auto_stop_frame.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(auto_stop_frame, text="Auto-stop if no steps for:").pack(side="left")
+        self.auto_stop_var = tk.StringVar(value=str(int(self.DEFAULT_AUTO_STOP_S)))
+        ttk.Spinbox(
+            auto_stop_frame, from_=1, to=300, increment=1, width=5,
+            textvariable=self.auto_stop_var,
+        ).pack(side="left", padx=(6, 4))
+        ttk.Label(auto_stop_frame, text="seconds").pack(side="left")
+
         self._set_controls_enabled(connected=False, running=False)
+        self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
 
     def _target_text(self) -> str:
         return f"Target: {self.target_tenths / 10:.1f} km/h"
@@ -336,6 +356,8 @@ class ControlTab:
         self.target_var.set(self._target_text())
         self.worker.send_play()
         self.running = True
+        self._last_seen_steps = None
+        self._last_step_change_time = time.monotonic()
         self._set_controls_enabled(connected=self.connected, running=self.running)
 
     def _on_stop(self) -> None:
@@ -369,6 +391,30 @@ class ControlTab:
 
     def on_telemetry(self, tenths_est: int, steps: int) -> None:
         self.telemetry_var.set(f"Speed: {tenths_est / 10:.1f} km/h   Steps: {steps}")
+        if self.running and steps != self._last_seen_steps:
+            self._last_step_change_time = time.monotonic()
+        self._last_seen_steps = steps
+
+    def _auto_stop_timeout_s(self) -> float:
+        try:
+            value = float(self.auto_stop_var.get())
+        except ValueError:
+            value = -1
+        # A blank/garbage entry falls back to the default rather than
+        # silently disabling the safety check -- this is a safety feature,
+        # so a bad typo in the box shouldn't be able to turn it off.
+        return value if value > 0 else self.DEFAULT_AUTO_STOP_S
+
+    def _check_auto_stop(self) -> None:
+        if self.running:
+            elapsed = time.monotonic() - self._last_step_change_time
+            timeout = self._auto_stop_timeout_s()
+            if elapsed >= timeout:
+                self.worker.send_stop()
+                self.running = False
+                self._set_controls_enabled(connected=self.connected, running=self.running)
+                self.status_var.set(f"Auto-stopped: no steps detected for {timeout:.0f}s.")
+        self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
 
 
 class HistoryTab:
