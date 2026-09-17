@@ -146,6 +146,43 @@ uint16_t uart_tx_current_raw(void)
     return s_current_raw; /* single aligned 16-bit read/write on ESP32; TX task is the sole writer */
 }
 
+uint8_t uart_tx_speed_raw_to_tenths(uint16_t raw)
+{
+    const int last = (int)(sizeof(SPEED_RAW_TABLE) / sizeof(SPEED_RAW_TABLE[0])) - 1;
+
+    /* raw==0 is true idle/full stop (README: decrease walks all the way
+     * down to a real 0, not a nonzero floor) -- must report 0.0 km/h, not
+     * clamp to the table's 0.8 km/h floor like an out-of-range low value
+     * would. */
+    if (raw == 0) {
+        return 0;
+    }
+    if (raw <= SPEED_RAW_TABLE[0]) {
+        return UART_TX_SPEED_MIN_TENTHS;
+    }
+    if (raw >= SPEED_RAW_TABLE[last]) {
+        return UART_TX_SPEED_MAX_TENTHS;
+    }
+
+    /* Table is monotonically increasing -- binary search for the first
+     * entry >= raw, then snap to whichever neighbor raw is numerically
+     * closer to. */
+    int lo = 0, hi = last;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (SPEED_RAW_TABLE[mid] < raw) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo > 0 && (raw - SPEED_RAW_TABLE[lo - 1]) < (SPEED_RAW_TABLE[lo] - raw)) {
+        lo -= 1;
+    }
+
+    return (uint8_t)(UART_TX_SPEED_MIN_TENTHS + lo);
+}
+
 /* Builds the one CON->BASE frame shape this firmware ever sends. */
 static void build_frame(uint8_t *out, uint8_t state, uint8_t flag, uint16_t speed_raw)
 {

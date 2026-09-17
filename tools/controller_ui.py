@@ -46,7 +46,11 @@ SCAN_TIMEOUT_S = 15.0
 
 
 def decode_telemetry(data: bytes) -> tuple[float, int] | None:
-    """Returns (speed_km_h, steps) from a TELEMETRY record, or None if short."""
+    """
+    Returns (speed_km_h, steps) from a TELEMETRY record, or None if short.
+    byte 3's tenths-km/h estimate is the firmware's nearest-entry lookup
+    against its 53-point calibration table, not a raw approximation.
+    """
     if len(data) < 5:
         return None
     _version, _speed_hi, _speed_lo, tenths_est, steps = data[:5]

@@ -304,21 +304,11 @@ void ble_gatt_notify_telemetry(uint16_t speed_raw, uint8_t steps)
         return; /* no subscriber connected -- nothing to deliver */
     }
 
-    /* raw/750: the proportional approximation from README's "Full-range
-     * calibration corrects /775" -- a convenience estimate for display,
-     * not a substitute for the exact 53-point table when precision
-     * matters. Clamped to fit one byte (should never realistically get
-     * close to 255 given the confirmed ~60-tenths max). */
-    uint32_t tenths_est = ((uint32_t)speed_raw * 10) / 750;
-    if (tenths_est > 255) {
-        tenths_est = 255;
-    }
-
     uint8_t record[5];
     record[0] = 0x01; /* format version */
     record[1] = (uint8_t)(speed_raw >> 8);
     record[2] = (uint8_t)(speed_raw & 0xFF);
-    record[3] = (uint8_t)tenths_est;
+    record[3] = uart_tx_speed_raw_to_tenths(speed_raw);
     record[4] = steps;
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(record, sizeof(record));

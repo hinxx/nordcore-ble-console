@@ -49,7 +49,8 @@ def decode_telemetry(data: bytearray) -> str:
     """
     TELEMETRY record (see ble_gatt.h): byte 0 = format version,
     byte 1:2 = raw CON->BASE speed (big-endian), byte 3 = tenths-km/h
-    estimate (raw/750 approximation), byte 4 = step count (wraps at 256).
+    estimate (nearest-entry lookup against the firmware's 53-point
+    calibration table), byte 4 = step count (wraps at 256).
     """
     if len(data) < 5:
         return f"[short record, {len(data)} byte(s)]: {data.hex(' ')}"

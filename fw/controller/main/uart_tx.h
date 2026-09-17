@@ -42,3 +42,12 @@ void uart_tx_cmd_set_speed_tenths(uint8_t tenths_km_h);
  * (not the target -- the value the ramp has reached so far). For
  * diagnostics/telemetry cross-checking only. */
 uint16_t uart_tx_current_raw(void);
+
+/* Convert a raw speed value (CON->BASE or BASE->CON -- README confirms the
+ * two share the same scale, BASE->CON tracking within ~1-3 units of jitter)
+ * to a tenths-km/h estimate by nearest-entry lookup against the same
+ * 53-point calibration table SET_SPEED uses, run in reverse. Accurate to
+ * that calibration, unlike the coarser raw/750 proportional approximation
+ * it replaces. raw==0 (true idle/full stop) reports 0; any other raw
+ * outside the table's range clamps to UART_TX_SPEED_MIN_TENTHS/_MAX_TENTHS. */
+uint8_t uart_tx_speed_raw_to_tenths(uint16_t raw);

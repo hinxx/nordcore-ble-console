@@ -28,9 +28,10 @@ void ble_gatt_start(void);
  *   byte 0    0x01 (format version, for future extensibility)
  *   byte 1:2  raw CON->BASE speed value, big-endian (the wire's own units --
  *             see root README's speed calibration table for exact km/h)
- *   byte 3    speed estimate, tenths of km/h (raw/750 approximation --
- *             see README's "Full-range calibration"; a convenience for a
- *             simple display, not as exact as a full table lookup)
+ *   byte 3    speed estimate, tenths of km/h -- nearest-entry lookup
+ *             against the same 53-point calibration table SET_SPEED
+ *             uses (uart_tx_speed_raw_to_tenths), run in reverse; see
+ *             README's "Full-range calibration corrects /775"
  *   byte 4    step count (0-255, wraps; resets to 0 at a real stop --
  *             see README's "The step counter, confirmed")
  *
