@@ -265,9 +265,6 @@ class BLEWorker:
         except Exception as exc:  # noqa: BLE001 -- report write failures, don't crash the loop
             self.events.put(("status", f"Write failed: {exc}"))
 
-    def send_play(self) -> None:
-        asyncio.run_coroutine_threadsafe(self._send(CMD_PLAY), self.loop)
-
     def send_stop(self) -> None:
         asyncio.run_coroutine_threadsafe(self._send(CMD_STOP), self.loop)
 
@@ -328,8 +325,18 @@ class ControlTab:
         self.reconnect_btn = ttk.Button(self.frame, text="Reconnect", command=self._on_reconnect)
         self.reconnect_btn.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
 
+        play_speed_frame = ttk.Frame(self.frame)
+        play_speed_frame.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(play_speed_frame, text="Play ramps up to:").pack(side="left")
+        self.play_speed_var = tk.StringVar(value=f"{SPEED_MIN_TENTHS / 10:.1f}")
+        ttk.Spinbox(
+            play_speed_frame, from_=SPEED_MIN_TENTHS / 10, to=SPEED_MAX_TENTHS / 10,
+            increment=0.1, width=5, format="%.1f", textvariable=self.play_speed_var,
+        ).pack(side="left", padx=(6, 4))
+        ttk.Label(play_speed_frame, text="km/h").pack(side="left")
+
         auto_stop_frame = ttk.Frame(self.frame)
-        auto_stop_frame.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        auto_stop_frame.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(auto_stop_frame, text="Auto-stop if no steps for:").pack(side="left")
         self.auto_stop_var = tk.StringVar(value=str(int(self.DEFAULT_AUTO_STOP_S)))
         ttk.Spinbox(
@@ -351,10 +358,23 @@ class ControlTab:
         self.up_btn.state(["!disabled"] if speed_ok else ["disabled"])
         self.down_btn.state(["!disabled"] if speed_ok else ["disabled"])
 
+    def _play_speed_tenths(self) -> int:
+        try:
+            km_h = float(self.play_speed_var.get())
+        except ValueError:
+            km_h = SPEED_MIN_TENTHS / 10
+        return min(max(round(km_h * 10), SPEED_MIN_TENTHS), SPEED_MAX_TENTHS)
+
     def _on_play(self) -> None:
-        self.target_tenths = SPEED_MIN_TENTHS
+        # SET_SPEED sent from a full stop engages the ramp exactly like
+        # PLAY does (uart_tx.c's ramp task only compares current vs.
+        # target, regardless of which command set it) -- so this reaches
+        # the configured preset directly instead of always landing on the
+        # firmware's fixed 0.8 km/h PLAY floor and needing manual Speed Up
+        # clicks afterward.
+        self.target_tenths = self._play_speed_tenths()
         self.target_var.set(self._target_text())
-        self.worker.send_play()
+        self.worker.send_speed(self.target_tenths)
         self.running = True
         self._last_seen_steps = None
         self._last_step_change_time = time.monotonic()
