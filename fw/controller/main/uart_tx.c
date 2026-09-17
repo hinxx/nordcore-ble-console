@@ -220,11 +220,26 @@ void uart_tx_start(void)
         abort();
     }
 
+    /*
+     * 8O1, not 8N2 -- both give 11 bits/character (1 start + 8 data + 1
+     * parity + 1 stop, vs. 1 start + 8 data + 0 parity + 2 stop), which is
+     * why this went unnoticed for so long: content, cadence, and even the
+     * fixed "stop" bit right before the next start bit all looked identical
+     * either way. Confirmed by measuring the bit immediately after the 8
+     * data bits directly off real captures: on the stock console it varies
+     * exactly with odd parity of that byte's data (0 for 68/08/20/43, which
+     * have an odd number of 1-bits; 1 for 00/14/3C, which have an even
+     * number) -- not a fixed stop bit at all, the way our own then-8N2 TX
+     * always showed 1 there regardless of data. See
+     * RX_TX_LEVEL_INVESTIGATION.md's "UART framing" section. The ESP32's
+     * hardware UART generates the parity bit automatically from this config
+     * alone; no other code here needs to change.
+     */
     const uart_config_t config = {
         .baud_rate = TX_BAUD,
         .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_2,
+        .parity = UART_PARITY_ODD,
+        .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .rx_flow_ctrl_thresh = 0,
         .source_clk = UART_SCLK_DEFAULT,

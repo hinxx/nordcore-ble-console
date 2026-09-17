@@ -13,7 +13,7 @@
  * is what actually gets printed in the serial boot banner below. See
  * fw/frame-sniffer, fw/byte-sniffer, fw/ble-sniffer for the same pattern. */
 #define FW_NAME     "controller"
-#define FW_VERSION  "1.0.3"
+#define FW_VERSION  "1.0.4"
 
 SemaphoreHandle_t g_console_mutex;
 
@@ -40,7 +40,7 @@ void app_main(void)
     uart_tx_start();
 
     console_log("\nESP32 treadmill controller -- %s v%s\n", FW_NAME, FW_VERSION);
-    console_log("UART1 TX: GPIO25 (CON->BASE, via TXB0104 level translator -- see DESIGN.md)\n");
+    console_log("UART1 TX: GPIO25 (CON->BASE, via 74AHCT125 buffer -- see DESIGN.md)\n");
     console_log("UART2 RX: GPIO27 (BASE->CON telemetry)\n");
     console_log("BLE: advertising as \"TreadmillController\"\n");
     console_log("  TELEMETRY notify: <version> <speed_raw hi> <speed_raw lo> <speed_tenths_est> <steps>\n");
