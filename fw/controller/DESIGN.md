@@ -239,27 +239,40 @@ this ever gets extended to something like incline.
 
 ## Staged rollout
 
+**Status: stages 1–3 achieved (see `RX_TX_LEVEL_INVESTIGATION.md`).** Getting
+there took far more than the TX level shifter this section originally worried
+about — the real blocker turned out to be a UART framing mismatch (`fw/controller`
+was transmitting 8N2 while the baseboard expects 8O1), not signal quality, once
+that document's investigation ran its course. Fixed in `uart_tx.c` (v1.0.4).
+`BASE->CON` now tracks a commanded ramp correctly on PLAY/SET_SPEED/STOP, and the
+belt has physically moved under `fw/controller`'s control, confirmed on two
+independent test runs.
+
 Agreed approach: **start by mimicking the original console as closely as possible**;
 only diverge (different timing, direct setpoint jumps, etc.) later and deliberately,
 once the faithful-replication baseline is proven solid.
 
 1. **Hardware bring-up.** Build the controller PCB (power supply, RX divider, TX level
    shifter). Bench-test the board on its own — power rail clean, TX shifter's idle-high
-   output correct — before it's ever connected to the real baseboard.
+   output correct — before it's ever connected to the real baseboard. **Done** — see
+   `RX_TX_LEVEL_INVESTIGATION.md` for the full hardware bring-up story (BC546 →
+   `TXB0104` → `74AHCT125`, plus the UART framing fix).
 2. **Heartbeat only, belt unloaded, nobody on it.** Controller rig connected in place of
    the stock console. Transmit *only* the idle frame at the observed burst/gap cadence —
    no speed commands yet.
    Confirm `BASE->CON` keeps reporting normal idle telemetry (matches the idle baseline
    already documented) and nothing faults. This is the first time anything ESP32-
    originated has ever reached the baseboard — treat it as the highest-risk single step
-   in the whole plan even though it's "just" the idle frame.
+   in the whole plan even though it's "just" the idle frame. **Done.**
 3. **Play and ramp to 0.8 km/h, belt unloaded.** Replicate the exact ramp shape and
    cadence already observed. Watch `BASE->CON` for the expected response (state flag,
    speed pair climbing to `620`, matching known-good patterns) and watch the belt
-   physically.
+   physically. **Done** — `BASE->CON` climbs cleanly to raw 620 on PLAY and holds, the
+   belt moved, confirmed directly.
 4. **Full range and stop, belt unloaded.** Ramp up toward the confirmed max, back down
    through the confirmed 0.8 km/h floor, stop — still mimicking observed behavior, still
-   unloaded.
+   unloaded. Partially exercised (PLAY → SET_SPEED 2.0 km/h → STOP, all tracking
+   correctly) — not yet pushed to the full confirmed range (up to raw `4444`).
 5. Only after 1–4 are solid: walking tests, then whatever divergence from stock
    behavior is actually wanted (faster ramps, different min/max, BLE command surface
    driving it in real time, etc.).
@@ -281,13 +294,14 @@ speed over time, since the baseboard never reports it.
 
 ## Open questions / not yet resolved
 
-- TX level: switched from a single-transistor BC546 inverting shifter, through a
-  `TXB0104` (tried and found unsuitable — its weak steady-state drive lost a fight
-  against the baseboard's own input bias, see Hardware plan above), to a `74HCT125`
-  buffer plus a 220Ω series resistor mirroring the stock console's own TX circuit
-  (see Hardware plan above and `RX_TX_LEVEL_INVESTIGATION.md`). Not yet bench-verified
-  against this baseboard's actual RX input characteristics — whether this circuit
-  actually resolves the non-response is still open.
+- **Resolved.** TX level went through BC546 → `TXB0104` (found unsuitable — see
+  Hardware plan above) → `74HCT125`/`74AHCT125` + 220Ω series resistor, and this
+  final circuit's voltage levels were confirmed to match the stock console's
+  exactly. But voltage was never actually the blocker: the real root cause was a
+  UART framing mismatch (`fw/controller` transmitting 8N2, the baseboard expecting
+  8O1), found and fixed in `uart_tx.c` (v1.0.4) — see
+  `RX_TX_LEVEL_INVESTIGATION.md`'s "UART framing: 8N2 vs 8O1" section. `BASE->CON`
+  now tracks a commanded ramp correctly and the belt has physically moved.
 - The baseboard's `CON->BASE` (RX) input has a real bias/pull-up of its own, in the
   same few-kΩ range as the `TXB0104`'s weak steady-state drive (inferred from the
   ~2.1V the two settled at when fighting each other, and consistent with the ~4.2–4.5V
