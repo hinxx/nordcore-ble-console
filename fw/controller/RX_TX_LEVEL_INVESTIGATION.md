@@ -4,10 +4,14 @@ Written up for outside review. `fw/controller` (the "clone" board below) transmi
 byte-for-byte, cycle-for-cycle identical `CON->BASE` traffic to the stock console,
 confirmed against live captures of the real console (see "Protocol verification"
 below), yet the baseboard never responds to it — `BASE->CON` telemetry stays at
-raw speed 0 / steps 0 through PLAY, SET_SPEED, and STOP, indefinitely. Every
-electrical property we know how to check from the outside (levels, ground
-reference, timing) reads as valid, and the actual root cause is still unknown.
-This document is the accumulated findings, not a conclusion.
+raw speed 0 / steps 0 through PLAY, SET_SPEED, and STOP, indefinitely. As of the
+`74AHCT125` attempt (near the end of this document), the TX signal reaching the
+baseboard has been directly confirmed — not just inferred to be within some
+threshold — as clean and correct as the real stock console's own signal: content,
+cadence, ground reference, and voltage levels all check out. The baseboard still
+does not react at all. This document is the accumulated findings, not a
+conclusion — the root cause is still unknown, and it now looks like something the
+electrical layer alone can't reveal.
 
 ## The symptom
 
@@ -268,29 +272,95 @@ on both rails, not an edge-triggered weak keeper) is the fix; series-resistor
 tuning is only meaningful once paired with a driver strong enough to be worth
 tuning against in the first place.
 
+## 74AHCT125 attempt — signal confirmed clean, symptom persists
+
+The `74HCT125`-class plan, in practice: a `74AHCT125` (TTL-compatible inputs,
+5V push-pull output, chosen over plain `74HC125` for the input-threshold
+reason discussed earlier) plus a 220Ω series resistor toward the baseboard
+connector, mirroring the stock console's own traced TX circuit exactly.
+
+**One wiring gotcha along the way, worth flagging for next time**: OE on the
+`74HCT125`/`74AHCT125` family is **active-LOW** — the opposite polarity from
+the `TXB0104`'s active-HIGH OE used earlier. Tying it high (matching the
+`TXB0104` convention) disables the output entirely (high-Z). First bring-up
+showed exactly that symptom — TX pinned flat at ~0V, zero toggling at all,
+no framing to even call "bad." Re-tied OE to GND and the chip started
+driving immediately.
+
+### Series resistor still mattered, but for the opposite reason as the `TXB0104`
+
+| Series resistance | TX LOW | TX HIGH | Content |
+|---|---:|---:|---|
+| 1kΩ | 2.45V | 4.37V | garbled |
+| **220Ω** | **1.12V** | **4.76V** | **clean, correct** |
+
+The 1kΩ result looked superficially like the `TXB0104`'s failure mode
+(compressed, garbled), but the underlying cause is different this time: the
+`74AHCT125`'s own output impedance is genuinely low (a real push-pull driver,
+not an edge-triggered keeper), so at 1kΩ the *resistor itself* — not a weak
+chip — was the dominant impedance fighting the baseboard's bias. Dropping to
+220Ω (matching the stock console's own value) was enough for this driver to
+win that fight.
+
+### Full functional test at 220Ω — the clearest result in this whole investigation
+
+A complete, scope-correlated PLAY → SET_SPEED(2.0 km/h) → STOP cycle over
+BLE, with the TX line captured throughout:
+
+- **467 bytes decoded, only 2 framing errors** — both in the first two bytes
+  of the entire capture window (almost certainly the window boundary cutting
+  into a frame already in flight, not an ongoing issue). This is
+  indistinguishable in quality from the real stock console's own signal,
+  measured under the identical methodology throughout this document.
+- The capture caught real, live ramp content: `320 → 244 → 168 → 92 → 16 → 0`
+  in the CON->BASE speed field, decrementing by exactly 76 each ~200ms cycle
+  — `uart_tx.c`'s own `RAMP_STEP_UNITS`, transmitted correctly, mid-STOP-ramp.
+  It settles cleanly into repeating `68 08 20 00 00 00 00 14 3C 43` idle
+  afterward, exactly as expected.
+- **`BASE->CON` telemetry never moved.** `01 00 00 00 00` (speed 0, steps 0)
+  for the entire ~11-second test — PLAY, SET_SPEED, and STOP all sent, all
+  correctly transmitted, zero reaction.
+
+### What this settles
+
+Content, cadence, ground reference, and now voltage levels have all been
+independently confirmed correct and clean — not merely "within some
+threshold," but empirically as good as the real console's own signal,
+verified with the same instruments and methodology used throughout this
+document. **This rules out signal quality as the explanation for the
+non-response, with much higher confidence than any earlier attempt got to.**
+Every hypothesis this document has chased on the electrical side — BC546
+pull-up sizing, `TXB0104` device mechanism, series resistor value, absolute
+voltage levels — has now been tested to a clean, working signal, and the
+baseboard still does not react at all. Whatever is actually blocking this has
+to be something the electrical layer alone can't reveal.
+
 ## Open questions for review
 
-1. **Why does the baseboard never respond**, given content, cadence, ground
-   reference, and TX voltage levels (by TTL standard) all check out against a
-   known-working reference? What test would distinguish "signal is
+1. **This is now the central question, with the electrical explanation
+   essentially eliminated**: why does the baseboard never respond, given the
+   `74AHCT125` section (near the end of this document) confirmed content,
+   cadence, ground reference, and TX voltage levels are not just "within
+   threshold" but empirically clean — captured mid-ramp, decrementing by
+   exactly the firmware's own step size, 467 bytes with only 2 framing
+   errors at the capture boundary? What test would distinguish "signal is
    electrically fine but not being sampled correctly" from "something
-   non-electrical is different"?
-2. Is the clone's TX idle-high (~4.0–4.3V, insensitive to pull-up strength)
-   actually adequate for this baseboard's real input threshold, or is there a
-   plausible failure mode (input capacitance, threshold near VIH_min under
-   real loading, slew rate) that a static DC-level analysis wouldn't catch?
-   Partially explained now — see the `TXB0104` section below: the baseboard's
-   input has a real bias of its own in the low-single-digit-kΩ range, which
-   any passive or weakly-driven "high" (the BC546's pull-up included) has to
-   fight rather than simply needing to clear a static threshold.
-3. **Resolved** (see the `TXB0104` section below): yes, the TX stage needs to
-   actively drive both rails at low impedance. The BC546's near-constant
-   collector voltage across three very different pull-up values, and the
-   `TXB0104`'s LOW settling at ~2.1V instead of near 0V, are both explained by
-   the same fact — the baseboard's `CON->BASE` input has a real bias of its
-   own, comparable in magnitude to a weak resistive pull-up or a translator's
-   weak steady-state drive, so neither ever decisively won. Not incomplete
-   BC546 cutoff after all; a genuine fight between two comparably-weak drives.
+   non-electrical is different"? This document has no answer yet.
+2. **Resolved** — see the `74AHCT125` section: the clone's TX levels are
+   adequate once actively driven at low impedance through a small enough
+   series resistor (220Ω, matching the stock console). The earlier ~4.0–4.3V
+   "TTL-valid but did nothing" result was real but not sufficient on its own;
+   a properly low-impedance drive plus the right series resistance produced a
+   signal indistinguishable from the real console's, and the baseboard still
+   didn't respond — so voltage level was never actually the blocker.
+3. **Resolved**: yes, the TX stage needed to actively drive both rails at low
+   impedance through a small series resistance. The BC546's near-constant
+   collector voltage across three pull-up values, the `TXB0104`'s LOW
+   settling at ~2.1V even at 0Ω added resistance, and the `74AHCT125`'s own
+   1kΩ-vs-220Ω contrast are all explained by the same fact — the baseboard's
+   `CON->BASE` input has a real bias of its own, and a driver needs both low
+   output impedance *and* a small enough series resistance to firmly win
+   against it. 220Ω (matching the stock console exactly) does.
 4. Is the RX-side divider's resulting ~8.3–8.7V at GPIO27 something to fix
    independently (it's above the ESP32's rated input range) even though it
    isn't the cause of the current symptom?
