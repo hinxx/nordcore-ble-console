@@ -402,6 +402,25 @@ from "nothing/something else is here," it isn't visible in the UART content,
 its timing, or a fifth wire — which are the three things this document knows
 how to check from the outside.
 
+### Side-by-side comparison against the clone's own power cycle
+
+The same experiment was repeated with the clone board (`74AHCT125` + 220Ω,
+v1.0.3) in place instead of the stock console, using the identical
+methodology (90s window, per-second stdev scan to locate the transition).
+Reference screenshots for both, at matching zoom levels showing the same
+flat-then-active transition shape: `original_console_boot.png` and
+`clone_board_boot.png` (both in this directory).
+
+Result: **no discrepancy found.** The clone's own power-up produces the same
+ordinary idle content on both wires as the stock console's did —
+`68 08 20 00 00 00 00 14 3C 43` on TX, `68 0C A0 00 00 00 00 ...` on RX —
+and the two screenshots are visually indistinguishable in shape (a clean
+flat-to-toggling transition at the power-on moment, sustained afterward).
+This was expected, since the clone's own firmware behavior was already known
+(`uart_tx.c` starts transmitting idle immediately in `app_main`), but it
+closes off the possibility that the clone's *own* boot sequence looks
+different from the console's in some way this document hadn't checked yet.
+
 ## Open questions for review
 
 1. **This is now the central question, with the electrical explanation
