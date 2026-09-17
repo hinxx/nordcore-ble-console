@@ -1,28 +1,55 @@
 # RX/TX electrical investigation — clone controller vs. stock console
 
-Written up for outside review. `fw/controller` (the "clone" board below) transmits
-byte-for-byte, cycle-for-cycle identical `CON->BASE` traffic to the stock console,
-confirmed against live captures of the real console (see "Protocol verification"
-below), yet the baseboard never responds to it — `BASE->CON` telemetry stays at
-raw speed 0 / steps 0 through PLAY, SET_SPEED, and STOP, indefinitely. As of the
-`74AHCT125` attempt (near the end of this document), the TX signal reaching the
-baseboard has been directly confirmed — not just inferred to be within some
-threshold — as clean and correct as the real stock console's own signal: content,
-cadence, ground reference, and voltage levels all check out. The baseboard still
-does not react at all. This document is the accumulated findings, not a
-conclusion — the root cause is still unknown.
+**RESOLVED.** Root cause: `fw/controller`'s UART was configured 8N2 (no
+parity, 2 stop bits) while the stock console actually transmits **8O1** (odd
+parity, 1 stop bit) — both 11 bits/character, which is exactly why content,
+cadence, and every voltage/level measurement in this document looked
+identical the whole time. Confirmed directly by measuring the bit
+immediately after the 8 data bits on real captures: on the stock console it
+varies exactly with odd parity of that byte's data; on the clone (then 8N2)
+it was fixed at 1 regardless of data, every single capture in this
+investigation. Fixed in `uart_tx.c` by changing `.parity` to
+`UART_PARITY_ODD` and `.stop_bits` to `UART_STOP_BITS_1` (v1.0.4) — a
+config-only change, no other code affected. Confirmed working end to end:
+`BASE->CON` telemetry now tracks a commanded ramp exactly like the real
+console (PLAY → climbs to raw 620/0.8km/h and holds; SET_SPEED 2.0km/h →
+climbs to raw ~1534/2.0km/h and holds; STOP → ramps back down), reproduced
+twice, and **the belt physically moved** on both runs. See "UART framing:
+8N2 vs 8O1 — the actual root cause" near the end of this document for the
+full discovery, and `first_successful_play_stop.png` for the scope capture
+of the second, belt-confirmed run.
 
-**Major finding, near the end of this document**: the baseboard has an audible
-relay that engages/disengages based purely on detecting active `CON->BASE` (TX)
-traffic — nothing to do with RX, power source, or protocol content in any way
-this document has been able to test. The clone's TX signal, even in its fully
-voltage/content/cadence-verified form, never triggers this relay at all. That
-relay is almost certainly the actual gate on the whole system responding —
-see "Relay-click discovery" below. The mystery has narrowed from "why doesn't
-the baseboard react" to "what does this specific detector see on the real
-console's TX that it doesn't see on ours," which is likely something below the
-level this document has instruments to check directly (current sink/source
-capability, edge slew rate) rather than anything already measured.
+Everything below is kept as the historical record of how this was found —
+every dead end is real work that narrowed the search, not wasted effort, and
+the methodology (skepticism toward screenshot-reading, insistence on direct
+measurement, retracting wrong theories in writing rather than quietly
+dropping them) is probably as useful to whoever reads this next as the
+answer itself.
+
+---
+
+**Original framing of the problem, kept for context**: `fw/controller` (the
+"clone" board below) transmits byte-for-byte, cycle-for-cycle identical
+`CON->BASE` traffic to the stock console, confirmed against live captures of
+the real console (see "Protocol verification" below), yet the baseboard
+never responds to it — `BASE->CON` telemetry stays at raw speed 0 / steps 0
+through PLAY, SET_SPEED, and STOP, indefinitely. As of the `74AHCT125`
+attempt (later in this document), the TX signal reaching the baseboard had
+been directly confirmed — not just inferred to be within some threshold —
+as clean and correct as the real stock console's own signal: content,
+cadence, ground reference, and voltage levels all checked out, and the
+baseboard still didn't react at all.
+
+The baseboard also has an audible relay that engages/disengages based on
+detecting active `CON->BASE` (TX) traffic — nothing to do with RX, power
+source, or protocol content in any way this document was able to test with
+a scope. The clone's TX signal, even in its fully voltage/content/cadence-
+verified 8N2 form, never triggered this relay. In hindsight, this is fully
+explained by the framing mismatch too: a baseboard UART peripheral genuinely
+configured for 8O1 would flag a hardware parity error on every 8N2 byte
+whose extra bit didn't happen to match what odd parity required, and very
+plausibly never refreshes the relay's watchdog on a parity-errored frame —
+see "UART framing" below for exactly how this was found.
 
 ## The symptom
 
@@ -606,32 +633,116 @@ ruling-out: worth repeating across several edges (and the rising edge too,
 since a driver's rise and fall characteristics aren't always symmetric)
 before treating slew rate as settled either way.
 
-### Still open
+### Still open (as of the electrical investigation — see below for the actual answer)
 
 - Actual current sunk/sourced by the TX line while driving LOW, not just the
-  resulting voltage — not yet measured.
-- Rising-edge (LOW→HIGH) slew rate — not yet measured.
-- Averaged/statistical edge-timing comparison across many edges rather than
-  one sample per side — not yet done.
+  resulting voltage — not measured, and turned out not to matter.
+- Rising-edge (LOW→HIGH) slew rate — not measured, and turned out not to
+  matter.
+- Averaged/statistical edge-timing comparison across many edges — not done,
+  and turned out not to matter.
+
+None of these needed answering — see below.
+
+## UART framing: 8N2 vs 8O1 — the actual root cause
+
+Prompted by a direct, careful visual comparison of two scope screenshots (an
+idle-frame capture from the clone and one from the stock console) that, on
+close inspection, showed different-looking pulse-width patterns despite
+identical decoded byte content and matching voltage levels. That observation
+led to checking something no earlier step in this document had checked:
+not just *what byte value* each frame decodes to, but the *exact bit* sitting
+between the 8 data bits and the byte boundary — the assumption throughout
+this entire investigation (baked into `tools/decode_scope_csv.py` and every
+manual bit-count in this document) had been 8N2 (8 data bits, no parity, 2
+stop bits). That assumption was never itself tested.
+
+### The test
+
+Both 8N2 (1 start + 8 data + 0 parity + 2 stop) and 8O1 (1 start + 8 data + 1
+parity + 1 stop) are 11 bits per character — identical frame duration,
+identical cadence, identical decoded byte value under either interpretation
+(a naive decoder that just reads 8 data bits and checks for "stop bits ≈ 1"
+would report the same byte value regardless of which framing is real, and
+would only flag an error if the assumed-stop-bit position happened to read
+0). The only way to tell them apart is to look at the specific bit
+immediately after the 8 data bits and check whether it's a fixed 1 (real
+8N2's first stop bit) or whether it varies with the data (8O1's parity bit).
+
+Measured directly off real, precisely-timestamped raw samples (not a
+screenshot) for the known idle frame `68 08 20 00 00 00 00 14 3C 43`, both
+boards, same methodology used throughout this document:
+
+| Byte | 1-bits | Odd parity would need | Clone's bit9 | Console's bit9 |
+|---|---:|---:|---:|---:|
+| `68` | 3 (odd) | 0 | 1 | **0** |
+| `08` | 1 (odd) | 0 | 1 | **0** |
+| `20` | 1 (odd) | 0 | 1 | **0** |
+| `00` | 0 (even) | 1 | 1 | 1 |
+| `00` | 0 (even) | 1 | 1 | 1 |
+| `00` | 0 (even) | 1 | 1 | 1 |
+| `00` | 0 (even) | 1 | 1 | 1 |
+| `14` | 2 (even) | 1 | 1 | 1 |
+| `3C` | 4 (even) | 1 | 1 | 1 |
+| `43` | 3 (odd) | 0 | 1 | **0** |
+
+The clone's bit9 is fixed at 1 for every byte, regardless of data — genuine
+8N2, exactly matching its then-current firmware config. The console's bit9
+tracks odd parity exactly, for every byte, in both of two independent frames
+checked — genuine 8O1. Bit10 (the true stop bit) was 1 on both boards in
+every case. The bytes where the two framings happen to agree (`00`, `14`,
+`3C` — all with an even number of data 1-bits, where odd parity also
+requires a 1) are exactly why the mismatch went unnoticed for so long:
+enough of the idle frame's own byte values coincidentally produce the same
+extra bit under either interpretation that a difference was never obvious
+without isolating this one bit's data-dependence specifically.
+
+### The fix
+
+`fw/controller/main/uart_tx.c`, in the `uart_config_t` passed to
+`uart_param_config()`:
+
+```c
+.parity    = UART_PARITY_ODD,   // was UART_PARITY_DISABLE
+.stop_bits = UART_STOP_BITS_1,  // was UART_STOP_BITS_2
+```
+
+The ESP32's hardware UART peripheral generates the correct parity bit for
+each transmitted byte automatically from this config; nothing else in the
+firmware needed to change. Shipped as v1.0.4.
+
+### Confirmed working, twice, with the belt moving
+
+Ran the real functional test (`tools/controller_play_stop_test.py`: PLAY →
+wait → SET_SPEED 2.0 km/h → wait → STOP, `BASE->CON` telemetry logged live)
+against the real baseboard with v1.0.4. Both times:
+
+- PLAY: raw speed climbs cleanly from 0 to **620** (0.8 km/h, the documented
+  floor) and holds.
+- SET_SPEED 2.0 km/h: climbs further to **~1534** (≈2.0 km/h) and holds.
+- STOP: ramps back down toward 0.
+
+This is the baseboard genuinely tracking a commanded setpoint for the first
+time in this entire investigation — not a decode artifact, not a partial
+response, the same shape of behavior documented from the real console
+throughout this whole project. **The belt physically moved on both runs**,
+confirmed directly. Scope capture of the second run (continuous, healthy TX
+and RX activity throughout, no dropouts) saved as
+`first_successful_play_stop.png`.
 
 ## Open questions for review
 
-1. **Reframed by the relay-click discovery (see that section above), and now
-   the sharpest open question in the whole document**: the baseboard's relay
-   — which the "Relay-click discovery" section shows is gated purely on
-   detecting active `CON->BASE` (TX) traffic, nothing to do with RX, power
-   source, or protocol content — never engages for the clone's TX, even
-   though that signal passes every content, cadence, and voltage-level check
-   this document knows how to perform, matching the real console's own
-   signal by every measure taken so far. What is this detector actually
-   sensing that differs? Current sink/source capability and edge slew rate
-   are the two live candidates (see that section) — both untested as of this
-   writing. A console-side power-up handshake was tested directly (see
-   "Power-cycle / handshake hypothesis" above) and found nothing, and the
-   connector has been confirmed to carry only 4 wires (12V/GND/RX/TX), ruling
-   out a separate presence-detect line — so whatever this is, it has to be
-   encoded in the TX signal's own electrical characteristics, at a level this
-   document hasn't measured yet.
+1. **Resolved — see "UART framing: 8N2 vs 8O1" above.** The relay (and the
+   baseboard's non-response generally) was gated on receiving hardware-valid
+   UART frames; the clone was transmitting 8N2 while the console transmits
+   8O1, so a real baseboard UART peripheral configured for 8O1 would flag a
+   parity error on roughly a third of the idle frame's own bytes (every one
+   with an odd number of 1-bits), never refreshing whatever watchdog gates
+   the relay. Every earlier hypothesis in this section (current sink/source
+   capability, edge slew rate) was a reasonable next step given what was
+   known at the time, but none of them needed to be true — the frames were
+   being electrically received and then rejected by hardware framing logic
+   underneath anything a voltage or timing measurement could see.
 2. **Resolved** — see the `74AHCT125` section: the clone's TX levels are
    adequate once actively driven at low impedance through a small enough
    series resistor (220Ω, matching the stock console). The earlier ~4.0–4.3V
