@@ -163,7 +163,9 @@ python3 tools/controller.py speed 2.5       # one-shot SET_SPEED to 2.5 km/h
 
 `tools/controller_ui.py` — a `bleak` + Tkinter desktop GUI over the same protocol: auto-scans/connects on launch, then gives Play / Stop / Speed Up / Speed Down buttons plus a live telemetry readout. `pip install bleak && python3 tools/controller_ui.py`.
 
-Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — both the script and the GUI send exactly what they're told, whenever they're told, with no safety gating of their own.
+`tools/treadmill_app.py` — a bigger sibling of `controller_ui.py`: same Control tab, plus a History tab backed by a local SQLite log (`tools/treadmill_history.db`, gitignored). Logging only happens while this app is open and connected — no separate background service. Every TELEMETRY sample is logged with a step delta computed the same reset-aware way `fw/controller/main/uart_rx.c` accumulates steps across speed changes, just one level up: a decrease in the firmware's own (already-accumulated) step count means a real stop or an ESP32 reboot happened, so that sample starts a fresh local segment instead of losing history. Daily/weekly totals are then a plain `SUM()` over the log, so they survive power cycles and app restarts. The History tab also shows an estimated distance (speed integrated over time) and a daily/weekly bar chart. `pip install bleak matplotlib && python3 tools/treadmill_app.py`.
+
+Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — every tool here sends exactly what it's told, whenever it's told, with no safety gating of its own.
 
 ## Output
 

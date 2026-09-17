@@ -12,6 +12,12 @@ __pycache__/
 .venv/
 venv/
 
+# tools/treadmill_app.py's local step-history log -- personal runtime data,
+# not something to commit
+tools/treadmill_history.db
+tools/treadmill_history.db-shm
+tools/treadmill_history.db-wal
+
 # Editor / OS
 .vscode/
 .idea/
