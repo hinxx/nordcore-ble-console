@@ -569,6 +569,51 @@ this whole system's response, reframing the fix away from "get the voltage
 right" (already done) toward "match the real driver's current/impedance
 characteristics."
 
+### Voltage match confirmed hands-on, current/slew-rate tests begun
+
+Since the section above was written, two more data points came in:
+
+**The clone's loaded voltage levels now match the stock console's exactly.**
+Measured directly, side by side: clone unloaded reads a clean 4.8V high /
+0V low; connected to the baseboard, the same clone reads 4.8V high / **1.2V**
+low (the baseboard's own bias pulling the LOW state up, same effect
+documented earlier in this file). The stock console, measured the same way
+under the same load, reads the identical 4.8V / 1.2V. This is about as
+direct a confirmation as possible that steady-state voltage — high or low —
+is not the differentiator; the two are now indistinguishable by that measure.
+A 100Ω series resistor was also tried (LOW moves further toward 0V) with no
+change in relay behavior, reinforcing that voltage level alone isn't the
+lever to pull here.
+
+**First edge slew-rate measurement: close, not dramatic.** Using the scope's
+own already-acquired memory (zooming a previously-captured wide window down
+to a narrow slice reveals much finer native sample spacing than the wide
+export provides — 60ns/sample here, vs. 4.62µs/sample for the same
+acquisition exported at 0.6s width) precise 90%→10% fall times were measured
+on one frame-start (idle-high → start-bit) edge each, stock console vs.
+clone:
+
+| | Fall time (90%→10%) |
+|---|---:|
+| Stock console | 109.1ns |
+| Clone | 125.1ns |
+
+A ~16ns difference, on the order of a single sample period at this
+resolution (60ns) — not the dramatic, order-of-magnitude gap that would
+obviously explain a hard pass/fail detector. This is a single edge measured
+once on each side, not an average, so it's inconclusive rather than a clean
+ruling-out: worth repeating across several edges (and the rising edge too,
+since a driver's rise and fall characteristics aren't always symmetric)
+before treating slew rate as settled either way.
+
+### Still open
+
+- Actual current sunk/sourced by the TX line while driving LOW, not just the
+  resulting voltage — not yet measured.
+- Rising-edge (LOW→HIGH) slew rate — not yet measured.
+- Averaged/statistical edge-timing comparison across many edges rather than
+  one sample per side — not yet done.
+
 ## Open questions for review
 
 1. **Reframed by the relay-click discovery (see that section above), and now
