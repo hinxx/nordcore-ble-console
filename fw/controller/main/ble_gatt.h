@@ -32,8 +32,11 @@ void ble_gatt_start(void);
  *             against the same 53-point calibration table SET_SPEED
  *             uses (uart_tx_speed_raw_to_tenths), run in reverse; see
  *             README's "Full-range calibration corrects /775"
- *   byte 4    step count (0-255, wraps; resets to 0 at a real stop --
- *             see README's "The step counter, confirmed")
+ *   byte 4    step count, accumulated across the whole run and only
+ *             reset at a real stop (0-255, wraps) -- NOT the baseboard's
+ *             raw per-segment byte, which also resets on every mid-run
+ *             speed change; see uart_rx.h's uart_rx_last_steps() for the
+ *             reconstruction logic
  *
  * A no-op if no central is connected or subscribed, same best-effort
  * semantics as fw/ble-sniffer's RX_LOG. Safe to call from any task.

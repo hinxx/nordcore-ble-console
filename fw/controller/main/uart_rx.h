@@ -17,9 +17,14 @@ void uart_rx_start(void);
 /*
  * Latest decoded telemetry from a valid BASE->CON frame. Per README's byte
  * tables: speed_raw is the noisy mirror of the commanded setpoint (bytes
- * 3:4), steps is the confirmed 1:1 step counter (offset 6, wraps at
- * 0xFF and resets to 0 at a real stop -- see README's "The step counter,
- * confirmed"). Safe to call from any task.
+ * 3:4). steps is an accumulated total across the whole run since the last
+ * real stop (or power-up) -- built from the baseboard's own per-segment
+ * counter (offset 6), which real-hardware testing showed resets to 0 not
+ * just at a real stop but on every mid-run speed change too; this getter
+ * reconstructs the run-wide total the stock console must show, banking
+ * each finished segment instead of losing it. Still an 8-bit wraparound
+ * value, same as the raw field it's built from. Safe to call from any
+ * task.
  */
 uint16_t uart_rx_last_speed_raw(void);
 uint8_t uart_rx_last_steps(void);

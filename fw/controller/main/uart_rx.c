@@ -55,6 +55,23 @@ typedef struct {
 static volatile uint16_t s_last_speed_raw = 0;
 static volatile uint8_t s_last_steps = 0;
 
+/*
+ * The baseboard's own per-segment step byte (offset 6) doesn't just wrap
+ * at 0xFF and reset at a real stop, as README originally documented --
+ * real-hardware testing (walking on it, comparing against the stock
+ * console) showed it also resets to 0 on every mid-run speed change,
+ * which the stock console must be accumulating across on its own display
+ * rather than showing verbatim. s_step_raw_last/s_step_base reconstruct
+ * that accumulation here: any decrease in the raw byte banks the
+ * finished segment's count into the base and keeps counting, UNLESS the
+ * baseboard's own measured speed (speed_raw, decoded from this same
+ * frame) is genuinely 0 -- a real stop, not just a new segment -- in
+ * which case the total actually resets to 0, matching the original
+ * "resets at a real stop" behavior.
+ */
+static uint8_t s_step_raw_last = 0;
+static uint32_t s_step_base = 0;
+
 uint16_t uart_rx_last_speed_raw(void)
 {
     return s_last_speed_raw;
@@ -115,7 +132,20 @@ static void handle_ok_frame(int64_t ts, const uint8_t *buf, size_t len)
     }
 
     uint16_t speed_raw = (uint16_t)((buf[BASE_CON_SPEED_HI_IDX] << 8) | buf[BASE_CON_SPEED_LO_IDX]);
-    uint8_t steps = buf[BASE_CON_STEPS_IDX];
+    uint8_t raw_steps = buf[BASE_CON_STEPS_IDX];
+
+    if (speed_raw == 0) {
+        /* Real idle -- reset unconditionally, not just on the decrease
+         * edge: the baseboard's own raw byte typically already dropped to
+         * 0 earlier in the ramp-down (ramping to 0 is itself "a speed
+         * change" to it), so by the time speed_raw itself reaches 0 no
+         * decrease is left to detect. */
+        s_step_base = 0;
+    } else if (raw_steps < s_step_raw_last) {
+        s_step_base += s_step_raw_last;
+    }
+    s_step_raw_last = raw_steps;
+    uint8_t steps = (uint8_t)((s_step_base + raw_steps) & 0xFF);
 
     s_last_speed_raw = speed_raw;
     s_last_steps = steps;
