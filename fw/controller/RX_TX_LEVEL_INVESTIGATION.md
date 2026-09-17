@@ -10,8 +10,19 @@ baseboard has been directly confirmed — not just inferred to be within some
 threshold — as clean and correct as the real stock console's own signal: content,
 cadence, ground reference, and voltage levels all check out. The baseboard still
 does not react at all. This document is the accumulated findings, not a
-conclusion — the root cause is still unknown, and it now looks like something the
-electrical layer alone can't reveal.
+conclusion — the root cause is still unknown.
+
+**Major finding, near the end of this document**: the baseboard has an audible
+relay that engages/disengages based purely on detecting active `CON->BASE` (TX)
+traffic — nothing to do with RX, power source, or protocol content in any way
+this document has been able to test. The clone's TX signal, even in its fully
+voltage/content/cadence-verified form, never triggers this relay at all. That
+relay is almost certainly the actual gate on the whole system responding —
+see "Relay-click discovery" below. The mystery has narrowed from "why doesn't
+the baseboard react" to "what does this specific detector see on the real
+console's TX that it doesn't see on ours," which is likely something below the
+level this document has instruments to check directly (current sink/source
+capability, edge slew rate) rather than anything already measured.
 
 ## The symptom
 
@@ -52,6 +63,11 @@ electrical layer alone can't reveal.
   reliable byte-sniffer logs) — the two directions run on independent,
   freely-drifting clocks with no phase relationship at all, on the real
   console. The clone's own firmware already behaves the same way.
+- **Power-source-based load detection.** See "Relay-click discovery" below:
+  the stock console still engages the baseboard's relay and works normally
+  when powered from a completely external 12V supply (shared ground only,
+  not drawing through the baseboard's own 12V pin). Whatever gates the
+  relay, it isn't about the baseboard sensing current on its own supply.
 - **Frame content.** `fw/controller`'s `uart_tx.c` transmits
   `68 08 21 50 00 FA 00 14 87 43` as the first non-idle frame after PLAY —
   confirmed against a live scope capture of the clone (not just the historical
@@ -471,22 +487,106 @@ genuinely independent, and the clone already matches that property
 correctly. Ruled out as an explanation for the non-response, with much
 stronger confidence than the inherited README claim carried on its own.
 
+## Relay-click discovery — TX presence detection, not signal correctness
+
+The single most important finding in this document. Discovered by ear, not
+by instrument: the baseboard has an audible relay (almost certainly gating
+power to the motor driver or some other critical circuit) that clicks on
+engage and again on disengage. This gave a completely new, previously
+untested signal to investigate against, independent of everything measured
+so far.
+
+### Baseline observations
+
+- **Stock console, power on/off**: a click each time — relay engaging on
+  power-up, disengaging on power-down.
+- **Clone, power on/off**: no click, ever, at any point in this
+  investigation, including with the fully verified 74AHCT125+220Ω circuit.
+- **Nothing attached at all** (baseboard powered, no console/clone): silent.
+  Confirms the relay isn't triggered by the baseboard's own power-up — it's
+  specifically detecting something about a console's *presence*.
+
+### Isolating what triggers it
+
+**Power source is not it.** The stock console, powered from a completely
+external 12V supply (sharing only ground with the baseboard, not drawing
+through the baseboard's own 12V pin at all) — relay still clicks, console
+still works normally. Rules out a "baseboard senses current on its own
+supply pin" load-detection mechanism entirely; whatever this is, it isn't
+about power at all.
+
+**TX presence is it — RX is irrelevant.** Systematically connecting/
+disconnecting the stock console's own RX and TX wires (independent of the
+clone, using the real console to map the baseboard's requirements):
+
+| Wires connected | Result |
+|---|---|
+| RX + TX | Click immediately on power-up |
+| RX only | No click, ever |
+| TX only (no RX at all) | Click |
+| Both, then TX removed while running | Click again ~5 seconds later (disengage) |
+| TX reconnected | Click immediately (re-engage) |
+
+This maps out an asymmetric watchdog gated purely on `CON->BASE` (TX)
+traffic: engage is fast (near-immediate once valid TX activity is present),
+disengage takes ~5 seconds of TX absence. RX/telemetry plays no role in the
+relay at all — a real console with only its TX wire connected engages the
+relay exactly like a fully-wired one.
+
+### The critical negative result
+
+With this mapped out, the obvious next test: does the clone's TX — the fully
+voltage/content/cadence-verified 74AHCT125+220Ω signal from the `74AHCT125`
+section above — trigger the same relay the same way? **It does not.** No
+click, ever, with the clone connected, under the same conditions that make
+the real console's TX-only connection click immediately.
+
+This is the sharpest result in the whole investigation: every check this
+document knows how to perform on the TX signal — byte content, checksum,
+cadence, idle-high/low voltage levels by both TTL standard and direct
+comparison to the real console, ground reference — passes, and this
+detector still doesn't fire. That means it's very likely sensing something
+below the level anything in this document has measured so far. Two
+candidates, both untested:
+
+- **Actual current the driver sinks/sources**, not the resulting voltage.
+  A detector built around injecting or monitoring current on the line (a
+  common way to distinguish "something is actively driving this" from "it's
+  floating or weakly biased") wouldn't show up in any voltage measurement
+  this document has taken, however clean.
+- **Edge speed / slew rate.** Every measurement so far has looked at
+  steady-state levels via percentiles; nothing has measured rise/fall time at
+  the microsecond scale. A detector keyed on edge rate rather than logic
+  level would be invisible to everything checked up to this point.
+
+### Suggested next step (not yet run)
+
+Measure and compare the actual current the TX line sinks while driving LOW —
+stock console vs. clone — not just the resulting voltage. If there's a
+meaningful difference in current capability despite matching voltage levels,
+that would point straight at a current-based detector as the actual gate on
+this whole system's response, reframing the fix away from "get the voltage
+right" (already done) toward "match the real driver's current/impedance
+characteristics."
+
 ## Open questions for review
 
-1. **This is now the central question, with the electrical explanation
-   essentially eliminated**: why does the baseboard never respond, given the
-   `74AHCT125` section (near the end of this document) confirmed content,
-   cadence, ground reference, and TX voltage levels are not just "within
-   threshold" but empirically clean — captured mid-ramp, decrementing by
-   exactly the firmware's own step size, 467 bytes with only 2 framing
-   errors at the capture boundary? A console-side power-up handshake was also
-   tested directly (see "Power-cycle / handshake hypothesis" above) and found
-   nothing — both wires resume with completely ordinary idle content after a
-   real, confirmed power-on transition, and the connector has been confirmed
-   to carry only 4 wires (12V/GND/RX/TX), ruling out a separate presence-
-   detect line too. What test would distinguish "signal is electrically fine
-   but not being sampled correctly" from "something non-electrical is
-   different"? This document has no answer yet.
+1. **Reframed by the relay-click discovery (see that section above), and now
+   the sharpest open question in the whole document**: the baseboard's relay
+   — which the "Relay-click discovery" section shows is gated purely on
+   detecting active `CON->BASE` (TX) traffic, nothing to do with RX, power
+   source, or protocol content — never engages for the clone's TX, even
+   though that signal passes every content, cadence, and voltage-level check
+   this document knows how to perform, matching the real console's own
+   signal by every measure taken so far. What is this detector actually
+   sensing that differs? Current sink/source capability and edge slew rate
+   are the two live candidates (see that section) — both untested as of this
+   writing. A console-side power-up handshake was tested directly (see
+   "Power-cycle / handshake hypothesis" above) and found nothing, and the
+   connector has been confirmed to carry only 4 wires (12V/GND/RX/TX), ruling
+   out a separate presence-detect line — so whatever this is, it has to be
+   encoded in the TX signal's own electrical characteristics, at a level this
+   document hasn't measured yet.
 2. **Resolved** — see the `74AHCT125` section: the clone's TX levels are
    adequate once actively driven at low impedance through a small enough
    series resistor (220Ω, matching the stock console). The earlier ~4.0–4.3V
