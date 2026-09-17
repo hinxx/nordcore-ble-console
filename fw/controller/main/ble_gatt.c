@@ -191,10 +191,42 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                     event->connect.status);
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
+
+            /* Ask for a fast connection interval instead of accepting
+             * whatever slower default the central negotiated at connect
+             * time -- README/DESIGN.md's ~200-220ms BASE->CON heartbeat
+             * is the real TELEMETRY data rate; the connection interval
+             * should stay comfortably under that, not become the
+             * bottleneck that throttles how often notifications actually
+             * get delivered. */
+            struct ble_gap_upd_params conn_params = {
+                .itvl_min = 16,             /* 16 * 1.25ms = 20ms */
+                .itvl_max = 32,             /* 32 * 1.25ms = 40ms */
+                .latency = 0,               /* don't skip connection events */
+                .supervision_timeout = 400, /* 400 * 10ms = 4s */
+                .min_ce_len = 0,
+                .max_ce_len = 0,
+            };
+            int rc = ble_gap_update_params(s_conn_handle, &conn_params);
+            if (rc != 0) {
+                console_log("BLE: connection parameter update request failed; rc=%d\n", rc);
+            }
         } else {
             ble_advertise();
         }
         return 0;
+
+    case BLE_GAP_EVENT_CONN_UPDATE: {
+        struct ble_gap_conn_desc desc;
+        if (event->conn_update.status == 0 &&
+            ble_gap_conn_find(event->conn_update.conn_handle, &desc) == 0) {
+            console_log("BLE: connection parameters updated; itvl=%.1fms latency=%d timeout=%dms\n",
+                        desc.conn_itvl * 1.25, desc.conn_latency, desc.supervision_timeout * 10);
+        } else {
+            console_log("BLE: connection parameter update failed; status=%d\n", event->conn_update.status);
+        }
+        return 0;
+    }
 
     case BLE_GAP_EVENT_DISCONNECT:
         console_log("BLE: disconnected; reason=%d\n", event->disconnect.reason);
