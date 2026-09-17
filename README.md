@@ -161,7 +161,9 @@ python3 tools/controller.py stop            # one-shot STOP
 python3 tools/controller.py speed 2.5       # one-shot SET_SPEED to 2.5 km/h
 ```
 
-Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — the script sends exactly what it's told, whenever it's told, with no safety gating of its own.
+`tools/controller_ui.py` — a `bleak` + Tkinter desktop GUI over the same protocol: auto-scans/connects on launch, then gives Play / Stop / Speed Up / Speed Down buttons plus a live telemetry readout. `pip install bleak && python3 tools/controller_ui.py`.
+
+Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — both the script and the GUI send exactly what they're told, whenever they're told, with no safety gating of their own.
 
 ## Output
 
