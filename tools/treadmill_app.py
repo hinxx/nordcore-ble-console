@@ -303,8 +303,16 @@ class BLEWorker:
             delta = 0  # first sample this connection: establish baseline only
         elif steps >= self._last_steps:
             delta = steps - self._last_steps
+        elif tenths_est == 0:
+            delta = steps  # genuine reset: firmware only zeroes its total at a real stop
         else:
-            delta = steps  # firmware-side reset (real stop or reboot) -- new segment
+            # steps decreased while still moving -- the firmware's own step
+            # count is an 8-bit value that wraps at 256 (fw/controller's
+            # uart_rx.c only zeroes it at speed_raw==0, so this can't be a
+            # reset), not a new segment. Credit the full wrap so a long
+            # continuous walk doesn't lose ~a whole 256-step cycle every
+            # time this rolls over.
+            delta = (256 - self._last_steps) + steps
         self._last_steps = steps
 
         self.events.put(("telemetry", tenths_est, steps, delta, time.time()))
