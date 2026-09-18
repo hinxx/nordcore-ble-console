@@ -357,9 +357,43 @@ class BLEWorker:
         self.events.put(("status", f"Connected to {DEVICE_NAME}."))
         self.events.put(("connected", True))
 
+    async def _disconnect_current(self) -> None:
+        # Reconnecting (or exiting) while still holding a live client used
+        # to just drop the Python reference -- but that never told BlueZ to
+        # actually close the old connection, leaving it open at the OS
+        # level. The board correctly won't advertise while it still thinks
+        # something's connected (see fw/controller/main/ble_gatt.c's
+        # ADV_COMPLETE fix), so a rescan would silently fail to find it,
+        # forever -- the exact same stale-connection symptom a leftover
+        # bluetoothctl/GNOME Bluetooth-panel session caused, just
+        # self-inflicted, whether by clicking Reconnect a second time or by
+        # just closing the app without disconnecting first.
+        if self.client is not None:
+            try:
+                await self.client.disconnect()
+            except Exception:  # noqa: BLE001 -- best-effort; proceed regardless
+                pass
+            self.client = None
+
     def reconnect(self) -> None:
-        self.client = None
-        asyncio.run_coroutine_threadsafe(self._connect(), self.loop)
+        asyncio.run_coroutine_threadsafe(self._reconnect(), self.loop)
+
+    async def _reconnect(self) -> None:
+        await self._disconnect_current()
+        await self._connect()
+
+    def disconnect_blocking(self, timeout: float = 3.0) -> None:
+        """Best-effort synchronous disconnect for a clean app shutdown --
+        called from Tkinter's main thread right before the window closes,
+        so it blocks briefly (up to timeout) rather than letting the
+        process exit mid-disconnect and leave the connection dangling."""
+        if self.client is None:
+            return
+        future = asyncio.run_coroutine_threadsafe(self._disconnect_current(), self.loop)
+        try:
+            future.result(timeout=timeout)
+        except Exception:  # noqa: BLE001 -- don't block shutdown on a slow/failed disconnect
+            pass
 
     async def _send(self, *payload: int) -> None:
         if self.client is None or not self.client.is_connected:
@@ -756,6 +790,7 @@ class App:
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
 
     def _on_close(self) -> None:
+        self.worker.disconnect_blocking()
         self.db.close()
         self.root.destroy()
 
