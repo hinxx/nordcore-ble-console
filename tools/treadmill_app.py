@@ -10,6 +10,10 @@ stays exactly as it is -- simple, no persistence) with two tabs:
     this app is connected, with daily/weekly step totals, an estimated
     distance, and a bar chart. Logging only happens while this app is open
     and connected -- there's no separate background service, by design.
+    Tracks two step counts side by side: the hardware's own (unreliable at
+    some speeds) and a speed-derived estimate from a configurable height,
+    since "did a footfall happen" is a much harder sensing problem than
+    "how fast is the belt moving."
 
 Same protocol as tools/controller.py/controller_ui.py -- see those and
 fw/controller/main/ble_gatt.h / DESIGN.md's "BLE console architecture" for
@@ -65,15 +69,31 @@ SCAN_TIMEOUT_S = 15.0
 
 DB_PATH = Path(__file__).with_name("treadmill_history.db")
 
-# HistoryDB.settings keys for ControlTab's persisted preferences.
+# HistoryDB.settings keys for ControlTab's/HistoryTab's persisted preferences.
 SETTING_PLAY_SPEED_KM_H = "play_speed_km_h"
 SETTING_AUTO_STOP_S = "auto_stop_s"
+SETTING_HEIGHT_CM = "height_cm"
 
 # When integrating speed over time to estimate distance, skip any gap
 # between consecutive samples bigger than this -- a pause, a disconnect, a
 # day boundary -- not actual walking. Comfortably above the real ~200-220ms
 # BASE->CON heartbeat cadence (README/DESIGN.md), even with some BLE jitter.
 MAX_INTEGRATION_GAP_S = 3.0
+
+# The hardware step count can be unreliable (missed/duplicate footfalls at
+# certain speeds) -- see the discussion that prompted this. STEP_LENGTH_FACTOR
+# is the standard pedometer-calibration constant relating a person's height
+# to their walking step length (one footfall, not a full 2-step stride):
+# step_length_cm ~= height_cm * 0.415. It's an approximation (real step
+# length isn't perfectly speed-independent -- people lengthen their stride
+# somewhat at faster paces too), good enough for a secondary/comparison
+# estimate, not a replacement for the real sensor.
+STEP_LENGTH_FACTOR = 0.415
+DEFAULT_HEIGHT_CM = 170.0
+
+
+def height_to_step_length_m(height_cm: float) -> float:
+    return height_cm * STEP_LENGTH_FACTOR / 100.0
 
 
 def decode_telemetry(data: bytes):
@@ -91,7 +111,15 @@ class HistoryDB:
     """Append-only sample log, one row per TELEMETRY notification. Daily/
     weekly totals are plain SUM(step_delta) queries -- no counter lives in
     the database that ever needs resetting, so history survives power
-    cycles, app restarts, and reconnects."""
+    cycles, app restarts, and reconnects.
+
+    Each row carries two independent step counts: step_delta (the
+    hardware's own reported count, reset-aware per BLEWorker) and
+    est_step_delta (a speed-derived estimate, see height_to_step_length_m
+    -- a comparison metric for when the hardware sensor looks wrong, not a
+    replacement for it)."""
+
+    _METRIC_COLUMNS = {"hardware": "step_delta", "estimated": "est_step_delta"}
 
     def __init__(self, path: Path):
         self.conn = sqlite3.connect(path)
@@ -102,10 +130,15 @@ class HistoryDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts REAL NOT NULL,
                 speed_tenths INTEGER NOT NULL,
-                step_delta INTEGER NOT NULL
+                step_delta INTEGER NOT NULL,
+                est_step_delta REAL NOT NULL DEFAULT 0
             )
             """
         )
+        # Migration for a samples table created before est_step_delta existed.
+        existing_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(samples)")}
+        if "est_step_delta" not in existing_cols:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN est_step_delta REAL NOT NULL DEFAULT 0")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts)")
         self.conn.execute(
             """
@@ -116,11 +149,29 @@ class HistoryDB:
             """
         )
         self.conn.commit()
+        # Seed from the table's own last row, not just None -- otherwise every
+        # app restart would silently lose one interval's worth of estimated
+        # steps on the very first sample (nothing to integrate against yet
+        # in a fresh process, even though the previous session's last sample
+        # is sitting right there in the table).
+        self._last_sample: tuple[float, int] | None = self.conn.execute(
+            "SELECT ts, speed_tenths FROM samples ORDER BY id DESC LIMIT 1"
+        ).fetchone()
 
-    def add_sample(self, ts: float, speed_tenths: int, step_delta: int) -> None:
+    def add_sample(self, ts: float, speed_tenths: int, step_delta: int, step_length_m: float) -> None:
+        est_step_delta = 0.0
+        if self._last_sample is not None:
+            prev_ts, prev_speed_tenths = self._last_sample
+            dt = ts - prev_ts
+            if 0 < dt <= MAX_INTEGRATION_GAP_S and step_length_m > 0:
+                avg_kmh = (prev_speed_tenths + speed_tenths) / 2.0 / 10.0
+                distance_m = avg_kmh * 1000.0 * dt / 3600.0
+                est_step_delta = distance_m / step_length_m
+        self._last_sample = (ts, speed_tenths)
+
         self.conn.execute(
-            "INSERT INTO samples (ts, speed_tenths, step_delta) VALUES (?, ?, ?)",
-            (ts, speed_tenths, step_delta),
+            "INSERT INTO samples (ts, speed_tenths, step_delta, est_step_delta) VALUES (?, ?, ?, ?)",
+            (ts, speed_tenths, step_delta, est_step_delta),
         )
         self.conn.commit()
 
@@ -136,47 +187,52 @@ class HistoryDB:
         )
         self.conn.commit()
 
-    def daily_totals(self, days: int):
+    def daily_totals(self, days: int, metric: str = "hardware"):
+        column = self._METRIC_COLUMNS[metric]
         rows = self.conn.execute(
-            """
-            SELECT date(ts, 'unixepoch', 'localtime') AS day, SUM(step_delta) AS steps
+            f"""
+            SELECT date(ts, 'unixepoch', 'localtime') AS day, SUM({column}) AS steps
             FROM samples GROUP BY day ORDER BY day DESC LIMIT ?
             """,
             (days,),
         ).fetchall()
         return list(reversed(rows))  # oldest -> newest, for left-to-right charting
 
-    def weekly_totals(self, weeks: int):
+    def weekly_totals(self, weeks: int, metric: str = "hardware"):
+        column = self._METRIC_COLUMNS[metric]
         rows = self.conn.execute(
-            """
-            SELECT strftime('%Y-W%W', ts, 'unixepoch', 'localtime') AS week, SUM(step_delta) AS steps
+            f"""
+            SELECT strftime('%Y-W%W', ts, 'unixepoch', 'localtime') AS week, SUM({column}) AS steps
             FROM samples GROUP BY week ORDER BY week DESC LIMIT ?
             """,
             (weeks,),
         ).fetchall()
         return list(reversed(rows))
 
-    def today_steps(self) -> int:
+    def today_steps(self, metric: str = "hardware") -> float:
+        column = self._METRIC_COLUMNS[metric]
         row = self.conn.execute(
-            """
-            SELECT COALESCE(SUM(step_delta), 0) FROM samples
+            f"""
+            SELECT COALESCE(SUM({column}), 0) FROM samples
             WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
             """
         ).fetchone()
         return row[0]
 
-    def current_week_steps(self) -> int:
+    def current_week_steps(self, metric: str = "hardware") -> float:
+        column = self._METRIC_COLUMNS[metric]
         row = self.conn.execute(
-            """
-            SELECT COALESCE(SUM(step_delta), 0) FROM samples
+            f"""
+            SELECT COALESCE(SUM({column}), 0) FROM samples
             WHERE strftime('%Y-W%W', ts, 'unixepoch', 'localtime')
                 = strftime('%Y-W%W', 'now', 'localtime')
             """
         ).fetchone()
         return row[0]
 
-    def total_steps(self) -> int:
-        row = self.conn.execute("SELECT COALESCE(SUM(step_delta), 0) FROM samples").fetchone()
+    def total_steps(self, metric: str = "hardware") -> float:
+        column = self._METRIC_COLUMNS[metric]
+        row = self.conn.execute(f"SELECT COALESCE(SUM({column}), 0) FROM samples").fetchone()
         return row[0]
 
     def tracking_since(self):
@@ -478,12 +534,15 @@ class ControlTab:
 
 
 class HistoryTab:
-    """Daily/weekly step totals, an estimated distance, and a bar chart
-    over the SQLite log HistoryDB maintains."""
+    """Daily/weekly step totals (hardware and speed-estimated side by
+    side), an estimated distance, and a bar chart over the SQLite log
+    HistoryDB maintains."""
 
-    def __init__(self, notebook: ttk.Notebook, db: HistoryDB):
+    def __init__(self, notebook: ttk.Notebook, db: HistoryDB, height_var: tk.StringVar):
         self.db = db
+        self.height_var = height_var
         self.view = tk.StringVar(value="daily")
+        self.metric = tk.StringVar(value="hardware")
 
         self.frame = ttk.Frame(notebook)
         pad = {"padx": 10, "pady": 6}
@@ -493,24 +552,51 @@ class HistoryTab:
             row=0, column=0, columnspan=3, sticky="w", **pad
         )
 
+        height_frame = ttk.Frame(self.frame)
+        height_frame.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(height_frame, text="Height (for estimated steps):").pack(side="left")
+        ttk.Spinbox(
+            height_frame, from_=100, to=220, increment=1, width=5,
+            textvariable=self.height_var,
+        ).pack(side="left", padx=(6, 4))
+        ttk.Label(height_frame, text="cm").pack(side="left")
+        self.step_length_var = tk.StringVar()
+        ttk.Label(height_frame, textvariable=self.step_length_var, foreground="#666666").pack(
+            side="left", padx=(10, 0)
+        )
+        self.height_var.trace_add("write", lambda *_: self._refresh_step_length_label())
+        self._refresh_step_length_label()
+
         toggle_frame = ttk.Frame(self.frame)
-        toggle_frame.grid(row=1, column=0, sticky="w", **pad)
+        toggle_frame.grid(row=2, column=0, sticky="w", **pad)
         ttk.Radiobutton(toggle_frame, text="Daily", variable=self.view, value="daily",
                         command=self._refresh_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Weekly", variable=self.view, value="weekly",
                         command=self._refresh_chart).pack(side="left")
+        ttk.Radiobutton(toggle_frame, text="Hardware steps", variable=self.metric, value="hardware",
+                        command=self._refresh_chart).pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(toggle_frame, text="Estimated steps", variable=self.metric, value="estimated",
+                        command=self._refresh_chart).pack(side="left")
 
-        ttk.Button(self.frame, text="Refresh", command=self.refresh).grid(row=1, column=2, sticky="e", **pad)
+        ttk.Button(self.frame, text="Refresh", command=self.refresh).grid(row=2, column=2, sticky="e", **pad)
 
         self.figure = Figure(figsize=(6.4, 3.4), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.frame)
-        self.canvas.get_tk_widget().grid(row=2, column=0, columnspan=3, sticky="nsew", padx=10, pady=(0, 10))
+        self.canvas.get_tk_widget().grid(row=3, column=0, columnspan=3, sticky="nsew", padx=10, pady=(0, 10))
 
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(3, weight=1)
 
         self.refresh()
+
+    def _refresh_step_length_label(self) -> None:
+        try:
+            height_cm = float(self.height_var.get())
+        except ValueError:
+            height_cm = DEFAULT_HEIGHT_CM
+        step_length_cm = height_to_step_length_m(height_cm) * 100
+        self.step_length_var.set(f"(~{step_length_cm:.0f} cm/step)")
 
     def refresh(self) -> None:
         self._refresh_summary()
@@ -521,26 +607,32 @@ class HistoryTab:
         today_start = datetime(now.year, now.month, now.day).timestamp()
         today_km = estimate_distance_km(self.db.samples_since(today_start))
 
-        total_steps = self.db.total_steps()
         since_ts = self.db.tracking_since()
         since_str = "no data yet" if since_ts is None else datetime.fromtimestamp(since_ts).strftime("%Y-%m-%d")
 
+        def both(fn) -> str:
+            hw = fn(metric="hardware")
+            est = fn(metric="estimated")
+            return f"{hw:.0f} hardware / {est:.0f} estimated"
+
         self.summary_var.set(
-            f"Today: {self.db.today_steps()} steps, {today_km:.2f} km\n"
-            f"This week: {self.db.current_week_steps()} steps\n"
-            f"All-time: {total_steps} steps (tracking since {since_str})"
+            f"Today: {both(self.db.today_steps)} steps, {today_km:.2f} km\n"
+            f"This week: {both(self.db.current_week_steps)} steps\n"
+            f"All-time: {both(self.db.total_steps)} steps (tracking since {since_str})"
         )
 
     def _refresh_chart(self) -> None:
         self.ax.clear()
+        metric = self.metric.get()
+        metric_label = "hardware" if metric == "hardware" else "estimated"
         if self.view.get() == "daily":
-            rows = self.db.daily_totals(days=14)
+            rows = self.db.daily_totals(days=14, metric=metric)
             labels = [day[5:] for day, _steps in rows]  # MM-DD
-            title = "Steps per day (last 14 days)"
+            title = f"{metric_label.capitalize()} steps per day (last 14 days)"
         else:
-            rows = self.db.weekly_totals(weeks=12)
+            rows = self.db.weekly_totals(weeks=12, metric=metric)
             labels = [week for week, _steps in rows]
-            title = "Steps per week (last 12 weeks)"
+            title = f"{metric_label.capitalize()} steps per week (last 12 weeks)"
 
         values = [steps or 0 for _label, steps in rows]
         self.ax.bar(labels, values, color="#4C72B0")
@@ -563,11 +655,18 @@ class App:
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.worker = BLEWorker(self.events)
 
+        self.height_var = tk.StringVar(
+            value=self.db.get_setting(SETTING_HEIGHT_CM, str(int(DEFAULT_HEIGHT_CM)))
+        )
+        self.height_var.trace_add(
+            "write", lambda *_: self.db.set_setting(SETTING_HEIGHT_CM, self.height_var.get())
+        )
+
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
 
         self.control_tab = ControlTab(notebook, self.worker, self.db)
-        self.history_tab = HistoryTab(notebook, self.db)
+        self.history_tab = HistoryTab(notebook, self.db, self.height_var)
         notebook.add(self.control_tab.frame, text="Control")
         notebook.add(self.history_tab.frame, text="History")
 
@@ -576,6 +675,15 @@ class App:
         self.worker.start()
         self.root.after(100, self._poll_events)
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
+
+    def _step_length_m(self) -> float:
+        try:
+            height_cm = float(self.height_var.get())
+        except ValueError:
+            height_cm = DEFAULT_HEIGHT_CM
+        if height_cm <= 0:
+            height_cm = DEFAULT_HEIGHT_CM
+        return height_to_step_length_m(height_cm)
 
     def _poll_events(self) -> None:
         try:
@@ -588,7 +696,7 @@ class App:
                 elif kind == "telemetry":
                     tenths_est, steps, delta, ts = rest
                     self.control_tab.on_telemetry(tenths_est, steps)
-                    self.db.add_sample(ts, tenths_est, delta)
+                    self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
         except queue.Empty:
             pass
         self.root.after(100, self._poll_events)
