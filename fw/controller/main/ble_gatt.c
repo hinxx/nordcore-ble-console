@@ -177,6 +177,8 @@ static void ble_advertise(void)
                            &adv_params, ble_gap_event_cb, NULL);
     if (rc != 0) {
         console_log("BLE: error starting advertisement; rc=%d\n", rc);
+    } else {
+        console_log("BLE: advertisement (re)started\n");
     }
 }
 
@@ -236,7 +238,21 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        ble_advertise();
+        /* reason=0 means advertising stopped because a central just
+         * connected (see ble_gap.h's adv_complete doc) -- BLE_GAP_EVENT_
+         * CONNECT already fires for that same event and is the one that
+         * should decide what happens next (nothing, here: stay connected
+         * until DISCONNECT resumes advertising). Restarting advertising
+         * unconditionally here made the device advertise again
+         * immediately after every connect, while still connected to a
+         * central -- wasted radio time, and exactly why a scanner would
+         * see this device listed twice: the original pre-connect
+         * advertisement, and this immediate again-advertising re-appearing
+         * right after. Any other reason (duration timeout, preemption)
+         * still resumes advertising as before. */
+        if (event->adv_complete.reason != 0) {
+            ble_advertise();
+        }
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
