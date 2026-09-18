@@ -235,6 +235,23 @@ class HistoryDB:
         row = self.conn.execute(f"SELECT COALESCE(SUM({column}), 0) FROM samples").fetchone()
         return row[0]
 
+    def hourly_totals_today(self, metric: str = "hardware"):
+        """24 (hour label, steps) pairs for today, 00-23, zero-filled for
+        hours with no activity -- a day-total bar loses when the walking
+        actually happened; this shows it."""
+        column = self._METRIC_COLUMNS[metric]
+        rows = self.conn.execute(
+            f"""
+            SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                   SUM({column}) AS steps
+            FROM samples
+            WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
+            GROUP BY hour
+            """
+        ).fetchall()
+        by_hour = dict(rows)
+        return [(f"{h:02d}", by_hour.get(h, 0)) for h in range(24)]
+
     def tracking_since(self):
         row = self.conn.execute("SELECT MIN(ts) FROM samples").fetchone()
         return row[0]
@@ -371,6 +388,7 @@ class ControlTab:
 
     AUTO_STOP_CHECK_MS = 500
     DEFAULT_AUTO_STOP_S = 10.0
+    AUTO_STOP_WARNING_S = 2.0  # show the red countdown once no step for this long
 
     def __init__(self, notebook: ttk.Notebook, worker: BLEWorker, db: HistoryDB):
         self.worker = worker
@@ -399,23 +417,28 @@ class ControlTab:
             row=2, column=0, columnspan=3, pady=(4, 10)
         )
 
+        self.countdown_var = tk.StringVar(value="")
+        ttk.Label(
+            self.frame, textvariable=self.countdown_var, font=("", 13, "bold"), foreground="red"
+        ).grid(row=3, column=0, columnspan=3, pady=(0, 6))
+
         self.down_btn = ttk.Button(self.frame, text="▼ Speed Down", command=self._on_speed_down)
-        self.down_btn.grid(row=3, column=0, **pad)
+        self.down_btn.grid(row=4, column=0, **pad)
 
         self.up_btn = ttk.Button(self.frame, text="▲ Speed Up", command=self._on_speed_up)
-        self.up_btn.grid(row=3, column=2, **pad)
+        self.up_btn.grid(row=4, column=2, **pad)
 
         self.play_btn = ttk.Button(self.frame, text="Play", command=self._on_play)
-        self.play_btn.grid(row=4, column=0, sticky="ew", **pad)
+        self.play_btn.grid(row=5, column=0, sticky="ew", **pad)
 
         self.stop_btn = ttk.Button(self.frame, text="Stop", command=self._on_stop)
-        self.stop_btn.grid(row=4, column=2, sticky="ew", **pad)
+        self.stop_btn.grid(row=5, column=2, sticky="ew", **pad)
 
         self.reconnect_btn = ttk.Button(self.frame, text="Reconnect", command=self._on_reconnect)
-        self.reconnect_btn.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
+        self.reconnect_btn.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
 
         play_speed_frame = ttk.Frame(self.frame)
-        play_speed_frame.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        play_speed_frame.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(play_speed_frame, text="Play ramps up to:").pack(side="left")
         default_play_speed = f"{SPEED_MIN_TENTHS / 10:.1f}"
         self.play_speed_var = tk.StringVar(
@@ -434,7 +457,7 @@ class ControlTab:
         )
 
         auto_stop_frame = ttk.Frame(self.frame)
-        auto_stop_frame.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+        auto_stop_frame.grid(row=8, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(auto_stop_frame, text="Auto-stop if no steps for:").pack(side="left")
         default_auto_stop = str(int(self.DEFAULT_AUTO_STOP_S))
         self.auto_stop_var = tk.StringVar(
@@ -538,6 +561,13 @@ class ControlTab:
                 self.running = False
                 self._set_controls_enabled(connected=self.connected, running=self.running)
                 self.status_var.set(f"Auto-stopped: no steps detected for {timeout:.0f}s.")
+                self.countdown_var.set("")
+            elif elapsed >= self.AUTO_STOP_WARNING_S:
+                self.countdown_var.set(f"Stopping in {timeout - elapsed:.1f}s -- step on the belt!")
+            else:
+                self.countdown_var.set("")
+        else:
+            self.countdown_var.set("")
         self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
 
 
@@ -549,7 +579,7 @@ class HistoryTab:
     def __init__(self, notebook: ttk.Notebook, db: HistoryDB, height_var: tk.StringVar):
         self.db = db
         self.height_var = height_var
-        self.view = tk.StringVar(value="daily")
+        self.view = tk.StringVar(value="today")
         self.metric = tk.StringVar(value="hardware")
 
         self.frame = ttk.Frame(notebook)
@@ -577,6 +607,8 @@ class HistoryTab:
 
         toggle_frame = ttk.Frame(self.frame)
         toggle_frame.grid(row=2, column=0, sticky="w", **pad)
+        ttk.Radiobutton(toggle_frame, text="Today (by hour)", variable=self.view, value="today",
+                        command=self._refresh_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Daily", variable=self.view, value="daily",
                         command=self._refresh_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Weekly", variable=self.view, value="weekly",
@@ -633,19 +665,29 @@ class HistoryTab:
         self.ax.clear()
         metric = self.metric.get()
         metric_label = "hardware" if metric == "hardware" else "estimated"
-        if self.view.get() == "daily":
+        view = self.view.get()
+        if view == "today":
+            rows = self.db.hourly_totals_today(metric=metric)
+            labels = [hour for hour, _steps in rows]
+            title = f"{metric_label.capitalize()} steps by hour (today)"
+            tick_step = 2  # 24 bars is crowded -- label every other hour
+        elif view == "daily":
             rows = self.db.daily_totals(days=14, metric=metric)
             labels = [day[5:] for day, _steps in rows]  # MM-DD
             title = f"{metric_label.capitalize()} steps per day (last 14 days)"
+            tick_step = 1
         else:
             rows = self.db.weekly_totals(weeks=12, metric=metric)
             labels = [week for week, _steps in rows]
             title = f"{metric_label.capitalize()} steps per week (last 12 weeks)"
+            tick_step = 1
 
         values = [steps or 0 for _label, steps in rows]
         self.ax.bar(labels, values, color="#4C72B0")
         self.ax.set_title(title)
         self.ax.set_ylabel("steps")
+        self.ax.set_xticks(range(0, len(labels), tick_step))
+        self.ax.set_xticklabels(labels[::tick_step])
         self.ax.tick_params(axis="x", rotation=45, labelsize=8)
         self.figure.tight_layout()
         self.canvas.draw()
