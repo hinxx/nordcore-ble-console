@@ -424,9 +424,13 @@ class ControlTab:
     DEFAULT_AUTO_STOP_S = 10.0
     AUTO_STOP_WARNING_S = 2.0  # show the red countdown once no step for this long
 
-    def __init__(self, notebook: ttk.Notebook, worker: BLEWorker, db: HistoryDB):
+    def __init__(
+        self, notebook: ttk.Notebook, worker: BLEWorker,
+        play_speed_var: tk.StringVar, auto_stop_var: tk.StringVar,
+    ):
         self.worker = worker
-        self.db = db
+        self.play_speed_var = play_speed_var
+        self.auto_stop_var = auto_stop_var
         self.connected = False
         self.running = False
         self.target_tenths = SPEED_MIN_TENTHS
@@ -471,40 +475,10 @@ class ControlTab:
         self.reconnect_btn = ttk.Button(self.frame, text="Reconnect", command=self._on_reconnect)
         self.reconnect_btn.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
 
-        play_speed_frame = ttk.Frame(self.frame)
-        play_speed_frame.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(play_speed_frame, text="Play ramps up to:").pack(side="left")
-        default_play_speed = f"{SPEED_MIN_TENTHS / 10:.1f}"
-        self.play_speed_var = tk.StringVar(
-            value=self.db.get_setting(SETTING_PLAY_SPEED_KM_H, default_play_speed)
-        )
-        ttk.Spinbox(
-            play_speed_frame, from_=SPEED_MIN_TENTHS / 10, to=SPEED_MAX_TENTHS / 10,
-            increment=0.1, width=5, format="%.1f", textvariable=self.play_speed_var,
-        ).pack(side="left", padx=(6, 4))
-        ttk.Label(play_speed_frame, text="km/h").pack(side="left")
-        # Persisted immediately on every edit (typed or via the spin arrows)
-        # so both settings are already loaded next time the app starts --
-        # no separate Save action to remember.
-        self.play_speed_var.trace_add(
-            "write", lambda *_: self.db.set_setting(SETTING_PLAY_SPEED_KM_H, self.play_speed_var.get())
-        )
-
-        auto_stop_frame = ttk.Frame(self.frame)
-        auto_stop_frame.grid(row=8, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(auto_stop_frame, text="Auto-stop if no steps for:").pack(side="left")
-        default_auto_stop = str(int(self.DEFAULT_AUTO_STOP_S))
-        self.auto_stop_var = tk.StringVar(
-            value=self.db.get_setting(SETTING_AUTO_STOP_S, default_auto_stop)
-        )
-        ttk.Spinbox(
-            auto_stop_frame, from_=1, to=300, increment=1, width=5,
-            textvariable=self.auto_stop_var,
-        ).pack(side="left", padx=(6, 4))
-        ttk.Label(auto_stop_frame, text="seconds").pack(side="left")
-        self.auto_stop_var.trace_add(
-            "write", lambda *_: self.db.set_setting(SETTING_AUTO_STOP_S, self.auto_stop_var.get())
-        )
+        # Play speed and auto-stop timeout live on the Settings tab (owned
+        # and persisted by SettingsTab) -- play_speed_var/auto_stop_var
+        # here are that tab's own StringVars, shared by reference, not
+        # copies, so editing them there is immediately live here too.
 
         self._set_controls_enabled(connected=False, running=False)
         self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
@@ -610,9 +584,8 @@ class HistoryTab:
     side), an estimated distance, and a bar chart over the SQLite log
     HistoryDB maintains."""
 
-    def __init__(self, notebook: ttk.Notebook, db: HistoryDB, height_var: tk.StringVar):
+    def __init__(self, notebook: ttk.Notebook, db: HistoryDB):
         self.db = db
-        self.height_var = height_var
         self.view = tk.StringVar(value="today")
         self.metric = tk.StringVar(value="hardware")
 
@@ -624,23 +597,10 @@ class HistoryTab:
             row=0, column=0, columnspan=3, sticky="w", **pad
         )
 
-        height_frame = ttk.Frame(self.frame)
-        height_frame.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(height_frame, text="Height (for estimated steps):").pack(side="left")
-        ttk.Spinbox(
-            height_frame, from_=100, to=220, increment=1, width=5,
-            textvariable=self.height_var,
-        ).pack(side="left", padx=(6, 4))
-        ttk.Label(height_frame, text="cm").pack(side="left")
-        self.step_length_var = tk.StringVar()
-        ttk.Label(height_frame, textvariable=self.step_length_var, foreground="#666666").pack(
-            side="left", padx=(10, 0)
-        )
-        self.height_var.trace_add("write", lambda *_: self._refresh_step_length_label())
-        self._refresh_step_length_label()
+        # Height (for the estimated-steps metric) lives on the Settings tab.
 
         toggle_frame = ttk.Frame(self.frame)
-        toggle_frame.grid(row=2, column=0, sticky="w", **pad)
+        toggle_frame.grid(row=1, column=0, sticky="w", **pad)
         ttk.Radiobutton(toggle_frame, text="Today (by hour)", variable=self.view, value="today",
                         command=self._refresh_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Daily", variable=self.view, value="daily",
@@ -652,25 +612,17 @@ class HistoryTab:
         ttk.Radiobutton(toggle_frame, text="Estimated steps", variable=self.metric, value="estimated",
                         command=self._refresh_chart).pack(side="left")
 
-        ttk.Button(self.frame, text="Refresh", command=self.refresh).grid(row=2, column=2, sticky="e", **pad)
+        ttk.Button(self.frame, text="Refresh", command=self.refresh).grid(row=1, column=2, sticky="e", **pad)
 
         self.figure = Figure(figsize=(6.4, 3.4), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.frame)
-        self.canvas.get_tk_widget().grid(row=3, column=0, columnspan=3, sticky="nsew", padx=10, pady=(0, 10))
+        self.canvas.get_tk_widget().grid(row=2, column=0, columnspan=3, sticky="nsew", padx=10, pady=(0, 10))
 
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(3, weight=1)
+        self.frame.rowconfigure(2, weight=1)
 
         self.refresh()
-
-    def _refresh_step_length_label(self) -> None:
-        try:
-            height_cm = float(self.height_var.get())
-        except ValueError:
-            height_cm = DEFAULT_HEIGHT_CM
-        step_length_cm = height_to_step_length_m(height_cm) * 100
-        self.step_length_var.set(f"(~{step_length_cm:.0f} cm/step)")
 
     def refresh(self) -> None:
         self._refresh_summary()
@@ -727,6 +679,82 @@ class HistoryTab:
         self.canvas.draw()
 
 
+class SettingsTab:
+    """All persisted preferences (play speed, auto-stop timeout, height) in
+    one place: owns the StringVars, loads them from HistoryDB.settings at
+    startup, and persists on every edit via a trace -- ControlTab and
+    HistoryTab just receive the vars by reference (not copies), so editing
+    a value here is immediately live wherever else it's used."""
+
+    def __init__(self, notebook: ttk.Notebook, db: HistoryDB):
+        self.db = db
+        self.frame = ttk.Frame(notebook)
+        pad = {"padx": 10, "pady": 8}
+
+        default_play_speed = f"{SPEED_MIN_TENTHS / 10:.1f}"
+        self.play_speed_var = tk.StringVar(
+            value=db.get_setting(SETTING_PLAY_SPEED_KM_H, default_play_speed)
+        )
+        self._persist_on_write(self.play_speed_var, SETTING_PLAY_SPEED_KM_H)
+
+        default_auto_stop = str(int(ControlTab.DEFAULT_AUTO_STOP_S))
+        self.auto_stop_var = tk.StringVar(
+            value=db.get_setting(SETTING_AUTO_STOP_S, default_auto_stop)
+        )
+        self._persist_on_write(self.auto_stop_var, SETTING_AUTO_STOP_S)
+
+        self.height_var = tk.StringVar(
+            value=db.get_setting(SETTING_HEIGHT_CM, str(int(DEFAULT_HEIGHT_CM)))
+        )
+        self._persist_on_write(self.height_var, SETTING_HEIGHT_CM)
+
+        row = 0
+        ttk.Label(self.frame, text="Play ramps up to:").grid(row=row, column=0, sticky="w", **pad)
+        ttk.Spinbox(
+            self.frame, from_=SPEED_MIN_TENTHS / 10, to=SPEED_MAX_TENTHS / 10,
+            increment=0.1, width=6, format="%.1f", textvariable=self.play_speed_var,
+        ).grid(row=row, column=1, sticky="w", **pad)
+        ttk.Label(self.frame, text="km/h").grid(row=row, column=2, sticky="w", **pad)
+
+        row += 1
+        ttk.Label(self.frame, text="Auto-stop if no steps for:").grid(row=row, column=0, sticky="w", **pad)
+        ttk.Spinbox(
+            self.frame, from_=1, to=300, increment=1, width=6, textvariable=self.auto_stop_var,
+        ).grid(row=row, column=1, sticky="w", **pad)
+        ttk.Label(self.frame, text="seconds").grid(row=row, column=2, sticky="w", **pad)
+
+        row += 1
+        ttk.Label(self.frame, text="Height (for estimated steps):").grid(row=row, column=0, sticky="w", **pad)
+        ttk.Spinbox(
+            self.frame, from_=100, to=220, increment=1, width=6, textvariable=self.height_var,
+        ).grid(row=row, column=1, sticky="w", **pad)
+        ttk.Label(self.frame, text="cm").grid(row=row, column=2, sticky="w", **pad)
+
+        row += 1
+        self.step_length_var = tk.StringVar()
+        ttk.Label(self.frame, textvariable=self.step_length_var, foreground="#666666").grid(
+            row=row, column=0, columnspan=3, sticky="w", padx=10
+        )
+        self.height_var.trace_add("write", lambda *_: self._refresh_step_length_label())
+        self._refresh_step_length_label()
+
+        self.frame.columnconfigure(3, weight=1)
+
+    def _persist_on_write(self, var: tk.StringVar, key: str) -> None:
+        # Persisted immediately on every edit (typed or via the spin
+        # arrows) so a value set here is already loaded next time the app
+        # starts -- no separate Save action to remember.
+        var.trace_add("write", lambda *_: self.db.set_setting(key, var.get()))
+
+    def _refresh_step_length_label(self) -> None:
+        try:
+            height_cm = float(self.height_var.get())
+        except ValueError:
+            height_cm = DEFAULT_HEIGHT_CM
+        step_length_cm = height_to_step_length_m(height_cm) * 100
+        self.step_length_var.set(f"-> ~{step_length_cm:.0f} cm/step")
+
+
 class App:
     HISTORY_REFRESH_MS = 30_000
 
@@ -739,20 +767,17 @@ class App:
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.worker = BLEWorker(self.events)
 
-        self.height_var = tk.StringVar(
-            value=self.db.get_setting(SETTING_HEIGHT_CM, str(int(DEFAULT_HEIGHT_CM)))
-        )
-        self.height_var.trace_add(
-            "write", lambda *_: self.db.set_setting(SETTING_HEIGHT_CM, self.height_var.get())
-        )
-
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
 
-        self.control_tab = ControlTab(notebook, self.worker, self.db)
-        self.history_tab = HistoryTab(notebook, self.db, self.height_var)
+        self.settings_tab = SettingsTab(notebook, self.db)
+        self.control_tab = ControlTab(
+            notebook, self.worker, self.settings_tab.play_speed_var, self.settings_tab.auto_stop_var
+        )
+        self.history_tab = HistoryTab(notebook, self.db)
         notebook.add(self.control_tab.frame, text="Control")
         notebook.add(self.history_tab.frame, text="History")
+        notebook.add(self.settings_tab.frame, text="Settings")
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -762,7 +787,7 @@ class App:
 
     def _step_length_m(self) -> float:
         try:
-            height_cm = float(self.height_var.get())
+            height_cm = float(self.settings_tab.height_var.get())
         except ValueError:
             height_cm = DEFAULT_HEIGHT_CM
         if height_cm <= 0:
