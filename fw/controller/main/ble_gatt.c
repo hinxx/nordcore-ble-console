@@ -352,12 +352,27 @@ void ble_gatt_notify_telemetry(uint16_t speed_raw, uint8_t steps)
         return; /* no subscriber connected -- nothing to deliver */
     }
 
-    uint8_t record[5];
+    /* TEMPORARY diagnostic (investigating ~1.8-1.9s bursty delivery while
+     * the motor is engaged -- see treadmill_app.py's [DBG-BLE]/[DBG-SEQ]
+     * instrumentation). seq increments on every attempted notify, letting
+     * the app detect whether any attempts go missing entirely (real loss)
+     * versus all arriving, just delayed (pure queuing/delivery latency).
+     * last_rc is the PREVIOUS call's ble_gatts_notify_custom() return code
+     * (0 = success) -- one call behind, since this call's own result isn't
+     * known until after the record is already built. Remove once
+     * root-caused. */
+    static uint8_t s_notify_seq = 0;
+    static uint8_t s_last_rc = 0;
+    s_notify_seq++;
+
+    uint8_t record[7];
     record[0] = 0x01; /* format version */
     record[1] = (uint8_t)(speed_raw >> 8);
     record[2] = (uint8_t)(speed_raw & 0xFF);
     record[3] = uart_tx_speed_raw_to_tenths(speed_raw);
     record[4] = steps;
+    record[5] = s_notify_seq;
+    record[6] = s_last_rc;
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(record, sizeof(record));
     if (om == NULL) {
@@ -366,5 +381,6 @@ void ble_gatt_notify_telemetry(uint16_t speed_raw, uint8_t steps)
 
     /* Best-effort, same as fw/ble-sniffer's RX_LOG: a dropped notification
      * just means this one update is missed, not a fault. */
-    ble_gatts_notify_custom(s_conn_handle, s_telemetry_val_handle, om);
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_telemetry_val_handle, om);
+    s_last_rc = (uint8_t)rc;
 }

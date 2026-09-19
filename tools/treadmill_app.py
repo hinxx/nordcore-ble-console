@@ -35,6 +35,7 @@ Requires: pip install bleak matplotlib
 """
 
 import asyncio
+import os
 import queue
 import sqlite3
 import sys
@@ -311,6 +312,37 @@ class BLEWorker:
         self.events.put(("connected", False))
 
     def _on_telemetry(self, _sender, data: bytearray) -> None:
+        # TEMPORARY: prove/disprove BLE-thread starvation directly at the
+        # point bleak invokes this callback, independent of anything on
+        # the Tkinter side.
+        now = time.monotonic()
+        gap_ms = (now - getattr(self, "_dbg_last_cb", now)) * 1000
+        self._dbg_last_cb = now
+
+        # TEMPORARY: bytes 5/6 are a diagnostic notify-attempt sequence
+        # number and the previous call's ble_gatts_notify_custom() return
+        # code, added in fw/controller/main/ble_gatt.c. A gap here means
+        # the firmware attempted a notify that never reached the app at
+        # all (real loss); no gap, even across a multi-second delivery
+        # gap, means everything arrived -- just late (pure queuing delay).
+        notify_seq = data[5] if len(data) >= 6 else None
+        last_rc = data[6] if len(data) >= 7 else None
+        if notify_seq is not None:
+            prev_seq = getattr(self, "_dbg_last_seq", None)
+            if prev_seq is not None:
+                expected = (prev_seq + 1) & 0xFF
+                if notify_seq != expected:
+                    missing = (notify_seq - expected) & 0xFF
+                    print(
+                        f"[DBG-SEQ] {time.time():.3f} GAP IN FIRMWARE SEQUENCE: "
+                        f"expected {expected}, got {notify_seq} ({missing} missing) rc={last_rc}",
+                        flush=True,
+                    )
+            self._dbg_last_seq = notify_seq
+
+        if gap_ms > 150:
+            print(f"[DBG-BLE] {time.time():.3f} callback gap: {gap_ms:.0f}ms seq={notify_seq} rc={last_rc}", flush=True)
+
         decoded = decode_telemetry(bytes(data))
         if decoded is None:
             return
@@ -795,9 +827,20 @@ class App:
         return height_to_step_length_m(height_cm)
 
     def _poll_events(self) -> None:
+        # TEMPORARY diagnostic -- tracking down why GUI updates look bursty
+        # even though HCI-level BLE delivery measured smooth. Remove once
+        # root-caused.
+        now = time.monotonic()
+        gap_ms = (now - getattr(self, "_dbg_last_poll", now)) * 1000
+        self._dbg_last_poll = now
+        if gap_ms > 150:
+            print(f"[DBG] _poll_events late by {gap_ms:.0f}ms since last call", flush=True)
+
+        drained = 0
         try:
             while True:
                 kind, *rest = self.events.get_nowait()
+                drained += 1
                 if kind == "status":
                     self.control_tab.on_status(rest[0])
                 elif kind == "connected":
@@ -805,9 +848,19 @@ class App:
                 elif kind == "telemetry":
                     tenths_est, steps, delta, ts = rest
                     self.control_tab.on_telemetry(tenths_est, steps)
-                    self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                    # TEMPORARY: set TREADMILL_DEBUG_SKIP_DB=1 to isolate
+                    # whether the SQLite write is what's starving the BLE
+                    # thread's asyncio loop of GIL time.
+                    if not os.environ.get("TREADMILL_DEBUG_SKIP_DB"):
+                        t0 = time.monotonic()
+                        self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                        commit_ms = (time.monotonic() - t0) * 1000
+                        if commit_ms > 20:
+                            print(f"[DBG] slow add_sample: {commit_ms:.0f}ms", flush=True)
         except queue.Empty:
             pass
+        if drained > 3:
+            print(f"[DBG] drained {drained} queued events in one _poll_events pass", flush=True)
         self.root.after(100, self._poll_events)
 
     def _refresh_history_periodically(self) -> None:
