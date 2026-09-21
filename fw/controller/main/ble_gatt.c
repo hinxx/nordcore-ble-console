@@ -5,6 +5,8 @@
 
 #include "esp_err.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -314,6 +316,28 @@ static int gatt_svr_init(void)
     return 0;
 }
 
+/* TEMPORARY (EMI/RF interference test -- see
+ * BLE_NOTIFY_LATENCY_INVESTIGATION.md). Set to 1 to make the board emit a
+ * synthetic TELEMETRY notification every ~200ms on its own, independent of
+ * any real BASE->CON UART traffic -- lets the board run fully standalone
+ * (external power, no wiring to the baseboard at all) so it can be moved
+ * physically close to the running motor to check whether BLE delivery
+ * itself degrades from proximity alone, isolated from any conductive/
+ * ground path to the baseboard. Leave at 0 for normal operation. */
+#define TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT 0
+
+#if TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT
+static void synthetic_heartbeat_task(void *arg)
+{
+    (void)arg;
+    uint8_t fake_steps = 0;
+    for (;;) {
+        ble_gatt_notify_telemetry(0, fake_steps++);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+#endif
+
 void ble_gatt_start(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -344,6 +368,16 @@ void ble_gatt_start(void)
     }
 
     nimble_port_freertos_init(ble_host_task);
+
+#if TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT
+    console_log("BLE: TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT enabled -- emitting "
+                "synthetic TELEMETRY every ~200ms regardless of UART input\n");
+    BaseType_t ok = xTaskCreate(synthetic_heartbeat_task, "synth_hb", 2048, NULL, 5, NULL);
+    if (ok != pdPASS) {
+        console_log("ERROR: failed to create synthetic heartbeat task\n");
+        abort();
+    }
+#endif
 }
 
 void ble_gatt_notify_telemetry(uint16_t speed_raw, uint8_t steps)
