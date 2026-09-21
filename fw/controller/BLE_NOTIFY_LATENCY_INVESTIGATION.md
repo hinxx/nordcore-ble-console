@@ -1,37 +1,28 @@
 # BLE telemetry delivery latency — bursty updates while the motor is engaged
 
-**UNRESOLVED — narrowed to a hardware/electrical hypothesis, software side
-exhausted.** `tools/treadmill_app.py`'s live Speed/Steps display updates
-smoothly (~200-225ms, matching the baseboard's own heartbeat) whenever the
-belt is idle, but while the motor is actively engaged (ramping *or* holding
-a nonzero commanded speed) it visibly jumps roughly once every 1.8-1.9
-seconds instead. The moment the belt returns to true idle, delivery snaps
-back to smooth. This has been reproduced on every single test run, with no
-exceptions, across many hours of investigation.
+**UNRESOLVED, but the trigger is now identified: ground-path impedance
+between the ESP32 controller and the baseboard, aggravated by motor
+current.** Not radiated EMI, not a software bug -- both ruled out by direct
+experiment (see below). `tools/treadmill_app.py`'s live Speed/Steps display
+updates smoothly (~200-225ms, matching the baseboard's own heartbeat)
+whenever the belt is idle, but while the motor is actively engaged (ramping
+*or* holding a nonzero commanded speed) it visibly jumps roughly once every
+1.8-1.9 seconds instead. The moment the belt returns to true idle, delivery
+snaps back to smooth.
 
 Every software-side candidate has been individually tested and ruled out.
 The firmware itself has been proven, via a purpose-built diagnostic, to
 attempt a BLE notification every ~200ms without fail, with the host-side
 NimBLE API reporting success (`rc=0`) every single time, all the way
-through the bursty periods. That leaves the delay confined to somewhere
-below `ble_gatts_notify_custom()`'s return -- inside the ESP32's own BLE
-controller/radio scheduling, a layer no application source code touches.
-
-**Leading hypothesis, not yet confirmed:** electrical, not logical. The
-only thing that's physically different between "idle" and "engaged" is
-that the baseboard is now driving real motor current. The user
-independently recalled seeing the *exact same symptom* on this same board
-over a **wired USB serial** connection: as soon as the motor engaged, the
-PC would report the USB device disappearing and reappearing, with kernel
-log messages suggesting EMI. Two completely different transports (BLE
-radio, USB serial) both degrading in the same way at the same trigger
-(motor engaging) is a strong signal this is EMI/ground-disturbance from
-the motor's own current draw affecting the controller board generally, not
-something specific to Bluetooth. Next step is hardware-level: decoupling
-capacitors, a cleaner/separate power supply, physically separating the
-Bluetooth dongle (or, if relevant, the ESP32 itself) from the baseboard --
-none of which this document attempts, since it's outside what's
-diagnosable from software.
+through the bursty periods. A follow-up hardware test then ruled out
+*radiated* EMI specifically (board isolated from the baseboard entirely,
+run on external power right next to the running motor -- stayed perfectly
+clean). What actually flips the symptom on and off, found by direct
+experiment: an **extra ground wire** between the controller board and a
+second point (even an unpowered external supply's ground terminal) fixes
+it; removing that same wire brings the bursty delivery straight back,
+regardless of which supply is actually powering the board. See "The actual
+trigger" below for the full experiment and what it implies.
 
 **Debugging instrumentation from this investigation is left in place on
 purpose** (both `tools/treadmill_app.py` and
@@ -158,25 +149,84 @@ correctly-incrementing per-~200ms steps, not the large jumps that would
 indicate the baseboard's own heartbeat had actually slowed -- the data is
 real and fresh throughout, only its BLE delivery is delayed.
 
+### 8. Radiated EMI via physical proximity alone
+
+To test the leading hypothesis at the time (EMI from the motor disrupting
+the ESP32's radio), added `TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT` (still
+present, see below) -- a compile-time flag that makes the board emit a
+synthetic TELEMETRY notification every ~200ms entirely on its own,
+independent of any real `BASE->CON` UART traffic. This let the board run
+fully standalone: external power, **zero wiring to the baseboard at all**
+(no UART, no shared ground), physically placed right on top of the running
+motor's casing at 3 km/h.
+
+Result, over a continuous ~95-second run: **zero bursts, zero sequence
+gaps, max gap 228ms.** Perfectly clean the entire time, right next to the
+running motor. This rules out pure radiated EMI/RF interference from
+proximity alone -- whatever is disrupting delivery requires some kind of
+electrical connection to the baseboard, not just nearness to the motor.
+
+## The actual trigger: ground-path impedance to the baseboard
+
+With radiated EMI ruled out, the natural next test was reconnecting the
+UART/ground wiring (restoring normal operation, board driving the motor
+for real) while still on external power -- the one remaining variable
+being the electrical connection itself, not proximity.
+
+This produced a real, if initially confusing, result. In order:
+
+1. **External 12V supply + baseboard wired (UART + ground)**: bursty
+   delivery returned, and separately the board briefly stopped being
+   discoverable over BLE entirely (resolved by a power cycle -- see below
+   for why this specific combination may have been marginal).
+2. **Switched to power drawn from the baseboard itself, same UART/ground
+   wiring**: worked cleanly. First read as "don't mix power sources," but
+   that framing turned out to be wrong.
+3. **The actual variable, found on closer inspection**: the external
+   supply's ground wire had been left physically connected the whole time,
+   even though the external supply itself was switched off. With that
+   extra ground wire in place -- regardless of which supply was actually
+   powering the board -- everything worked. Disconnecting *just that one
+   wire* (nothing else changed) brought the jerky bursts straight back.
+
+That's a specific, narrower claim than "don't mix power domains": **a
+single ground wire back to the baseboard isn't a low-enough-impedance
+ground reference for the ESP32 by itself, and a second ground path fixes
+it even when that second path goes to something unpowered.** The most
+likely explanation is that the baseboard's own ground reference gets noisy
+under motor load (a PWM motor driver sharing a ground plane with the UART
+circuitry is an ordinary source of this), and the ESP32's local ground --
+and with it its RF section -- gets dragged around by that noise when the
+single UART ground wire is its only reference. A second ground path either
+gives that noise current another route to drain through, or ties the
+ESP32's ground to a larger, quieter mass, reducing how much of the
+baseboard's noise actually reaches it.
+
+**Not yet done**: confirming this is about ground mass/impedance in
+general rather than something specific to that one external supply --
+i.e., trying a *different* second ground point (mains/earth ground, a PC
+chassis, anything else) and checking it fixes things the same way. If it
+does, the practical fix is a better/lower-impedance ground path between
+the controller board and the baseboard (a proper star ground, a beefier
+ground strap, or a controller PCB revision with a real ground plane)
+rather than anything about avoiding external power.
+
 ## Where this leaves it
 
 `rc=0` from `ble_gatts_notify_custom()` only means NimBLE's *host* layer
 accepted the notification and queued it for the controller/radio -- not
-that it was transmitted yet. Since the firmware side is now proven
-blameless down to that exact boundary, the stall is confined to whatever
-happens after that point: the ESP32's own BLE controller/link-layer
-scheduling, entirely below anything firmware source code controls or can
-observe without lower-level tooling (a radio-aware logic analyzer, or
-NimBLE/controller-internal instrumentation this project doesn't have).
-
-Given the software is proven byte-for-byte identical in both states, and
-the one genuine physical difference is the baseboard actively driving motor
-current, plus the independent USB-EMI precedent on this same hardware, the
-electrical/EMI hypothesis is where this stands. Practical impact in the
-meantime: **this is a live-display refresh problem only, not a data-loss
-problem** -- `tools/treadmill_app.py`'s logged history (daily/weekly
-totals, distance estimates) is unaffected, since the underlying data has
-been confirmed fresh and accurate throughout every stall.
+that it was transmitted yet. Since the firmware side is proven blameless
+down to that exact boundary, and radiated EMI is now ruled out too, the
+stall is best explained as the ESP32's own ground reference (and with it
+its RF section) being disturbed via the single UART ground wire whenever
+the baseboard's own ground gets noisy under motor load -- consistent with
+every observation in this document, including the original USB-disappearing
+precedent (also a single-wire ground connection to the baseboard, also
+only acting up under motor load). Practical impact in the meantime:
+**this is a live-display refresh problem only, not a data-loss problem**
+-- `tools/treadmill_app.py`'s logged history (daily/weekly totals,
+distance estimates) is unaffected, since the underlying data has been
+confirmed fresh and accurate throughout every stall.
 
 ## What's left in the code
 
@@ -199,8 +249,14 @@ Left in deliberately, in case this investigation resumes:
     from. Harmless if not watched; pipe to a file to capture them
     (`python3 tools/treadmill_app.py 2>&1 | tee /tmp/app_debug.log`, the
     pattern used throughout this investigation).
-- **`fw/controller/main/ble_gatt.c`**: `ble_gatt_notify_telemetry()`
-  appends two bytes to the TELEMETRY record (now 7 bytes, up from 5):
-  byte 5 is a rolling per-attempt sequence counter, byte 6 is the previous
-  call's `ble_gatts_notify_custom()` return code. Both fields are additive
-  -- any client only reading the original 5 bytes is unaffected.
+- **`fw/controller/main/ble_gatt.c`**:
+  - `ble_gatt_notify_telemetry()` appends two bytes to the TELEMETRY record
+    (now 7 bytes, up from 5): byte 5 is a rolling per-attempt sequence
+    counter, byte 6 is the previous call's `ble_gatts_notify_custom()`
+    return code. Both fields are additive -- any client only reading the
+    original 5 bytes is unaffected.
+  - `TREADMILL_DEBUG_SYNTHETIC_HEARTBEAT` -- a compile-time flag (default
+    `0`, normal operation unaffected). Set to `1` and reflash to make the
+    board emit a synthetic TELEMETRY notification every ~200ms on its own,
+    independent of any real UART input, for standalone proximity/EMI
+    testing without the baseboard connected at all.

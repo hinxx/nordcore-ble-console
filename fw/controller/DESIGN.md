@@ -327,12 +327,16 @@ speed over time, since the baseboard never reports it.
 - Whether anything changes about `BASE->CON`'s behavior when commands originate from the
   ESP32 instead of the stock console — assumed not, since the baseboard shouldn't be
   able to tell the difference, but not something sniffing could ever test.
-- **Unresolved, hardware hypothesis.** `tools/treadmill_app.py`'s live telemetry display
+- **Unresolved, trigger identified.** `tools/treadmill_app.py`'s live telemetry display
   updates smoothly while idle but in ~1.8-1.9s bursts while the motor is engaged — every
   software-side cause has been ruled out (see `BLE_NOTIFY_LATENCY_INVESTIGATION.md`),
   down to proving the firmware attempts a BLE notify every ~200ms without fail, success
-  reported every time, straight through the bursts. Leading hypothesis is EMI/ground
-  disturbance from the motor's own current draw, based partly on this same board showing
-  the identical disappear/reappear symptom over wired USB serial when the motor engages.
-  Diagnostic instrumentation is left in place in both `tools/treadmill_app.py` and
+  reported every time, straight through the bursts. Radiated EMI is also ruled out (board
+  standalone on external power, no baseboard wiring at all, sitting on the running motor's
+  casing — perfectly clean). What actually flips it: ground-path impedance between the
+  controller and the baseboard — a single UART ground wire isn't enough by itself, a
+  second ground path (even to an unpowered supply) fixes it, removing just that one wire
+  brings it straight back. Likely the baseboard's own ground gets noisy under motor load
+  and drags the ESP32's ground (and RF section) with it over that one thin wire. Diagnostic
+  instrumentation is left in place in both `tools/treadmill_app.py` and
   `fw/controller/main/ble_gatt.c` for whenever this gets picked up again.
