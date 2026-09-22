@@ -171,6 +171,8 @@ python3 tools/controller.py speed 2.5       # one-shot SET_SPEED to 2.5 km/h
 
 `pip install bleak matplotlib && python3 tools/treadmill_app.py`.
 
+If any of these tools suddenly can't connect (scan fails, or connects then immediately fails with `BleakError: failed to discover services`), see `tools/BLE_CONNECTION_RELIABILITY.md` -- a known, recurring class of Linux/BlueZ-side connection fragility, unrelated to the board itself, with a quick diagnostic checklist and the fix for each cause found so far.
+
 Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — every tool here sends exactly what it's told, whenever it's told, with no safety gating of its own.
 
 ## Output
