@@ -24,10 +24,11 @@ it; removing that same wire brings the bursty delivery straight back,
 regardless of which supply is actually powering the board. See "The actual
 trigger" below for the full experiment and what it implies.
 
-**Debugging instrumentation from this investigation is left in place on
-purpose** (both `tools/treadmill_app.py` and
-`fw/controller/main/ble_gatt.c`) in case this gets picked up again later --
-see "What's left in the code" at the end.
+**Firmware-side debugging instrumentation from this investigation is left
+in place on purpose** (`fw/controller/main/ble_gatt.c`) in case this gets
+picked up again later. The `tools/treadmill_app.py` side has since been
+removed -- it caused a real silent bug in normal use. See "What's left in
+the code" at the end for both.
 
 ---
 
@@ -230,9 +231,26 @@ confirmed fresh and accurate throughout every stall.
 
 ## What's left in the code
 
-Left in deliberately, in case this investigation resumes:
+**Update**: the `tools/treadmill_app.py` instrumentation described below
+(`TREADMILL_DEBUG_SKIP_DB`, `[DBG]`/`[DBG-BLE]`/`[DBG-SEQ]`) has since been
+**removed**. It caused a real bug in normal use: `TREADMILL_DEBUG_SKIP_DB`
+got left set in a terminal session after this investigation, silently
+disabling all history logging with no error, for long enough to look like a
+genuine regression. Since the investigation this instrumentation was for is
+now resolved (root cause found, see "Where this leaves it" above), it had
+done its job and the risk of it causing this kind of silent, hard-to-spot
+failure outweighed keeping it around. The original description is kept
+below for the historical record of what was used to reach the conclusions
+in this document.
 
-- **`tools/treadmill_app.py`**:
+The firmware-side diagnostic bytes (`fw/controller/main/ble_gatt.c`) are
+still in place -- see the second bullet below -- since they're purely
+additive to the wire format and don't carry the same "silently changes
+behavior" risk.
+
+Originally left in deliberately, in case this investigation resumed:
+
+- **`tools/treadmill_app.py`** (removed as of the update above):
   - `TREADMILL_DEBUG_SKIP_DB` environment variable -- set to any truthy
     value to skip the SQLite write in `_poll_events` (isolates DB-write
     cost from delivery timing).
@@ -244,12 +262,10 @@ Left in deliberately, in case this investigation resumes:
   - `[DBG-SEQ]` -- fires only on an actual gap in the firmware's notify
     sequence counter (real loss, not just delay). Never fired in the
     decisive test.
-  - These print unconditionally to stdout whenever they trigger -- not
-    gated behind a flag, so they'll show up in any console the app is run
-    from. Harmless if not watched; pipe to a file to capture them
-    (`python3 tools/treadmill_app.py 2>&1 | tee /tmp/app_debug.log`, the
-    pattern used throughout this investigation).
-- **`fw/controller/main/ble_gatt.c`**:
+  - These printed unconditionally to stdout whenever they triggered -- not
+    gated behind a flag, so they showed up in any console the app was run
+    from.
+- **`fw/controller/main/ble_gatt.c`** (still present):
   - `ble_gatt_notify_telemetry()` appends two bytes to the TELEMETRY record
     (now 7 bytes, up from 5): byte 5 is a rolling per-attempt sequence
     counter, byte 6 is the previous call's `ble_gatts_notify_custom()`
