@@ -33,16 +33,18 @@ sends exactly what you click, whenever you click it.
 
 Closing the window minimizes to an XFCE4/AppIndicator system tray icon
 instead of quitting -- the BLE connection and history logging keep running
-in the background. The icon's color and hover tooltip reflect live state
-(disconnected / connected-idle / running, plus current speed and this
-session's step count); the tray menu has "Show Treadmill" (also the
-default/click action) and "Quit" (the only way to actually exit).
+in the background. The icon's color and hover tooltip are meant to reflect
+live state (disconnected / connected-idle / running, plus current speed
+and this session's step count), though AppIndicator-backed icon repaints
+are known-unreliable on this host -- see the comment above the `pystray`
+import. Click the icon to open its menu: "Show Treadmill" restores the
+window, "Quit" is the only way to actually exit (AppIndicator icons have
+no separate click-to-activate -- every click opens the menu).
 
 Requires: pip install bleak matplotlib pystray pillow
 """
 
 import asyncio
-import os
 import queue
 import sqlite3
 import subprocess
@@ -59,17 +61,18 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-# pystray's default Linux backend order is appindicator, then gtk -- but the
-# AppIndicator/StatusNotifierItem backend has two problems for this app: its
-# dynamic icon updates are unreliable through most SN watchers (well-known
-# pystray/Linux limitation), and it hardcodes HAS_DEFAULT_ACTION = False, so
-# every click just opens the menu -- there's no click-to-activate. The plain
-# GTK StatusIcon backend (the older XEmbed systray protocol) does both
-# correctly: set_from_file() reliably repaints on every update, and a plain
-# left-click fires 'activate' (the default menu item) directly, with
-# right-click for the full menu. setdefault so an explicit override in the
-# environment still wins.
-os.environ.setdefault("PYSTRAY_BACKEND", "gtk")
+# Forcing PYSTRAY_BACKEND=gtk (the older XEmbed StatusIcon protocol) was
+# tried here to fix two AppIndicator-backend issues (unreliable dynamic icon
+# updates, no click-to-activate) -- but this host's xfce4-panel "systray"
+# plugin (the XEmbed host that backend needs) crashed under it
+# (systemd-coredump: panel-8-systray) and didn't come back even after a
+# panel restart + manual remove/re-add. Reverted to pystray's default
+# backend order (appindicator first, hosted here by xapp-status-plugin,
+# which was never implicated in that crash) -- a known-previously-visible
+# baseline, even though its icon doesn't repaint reliably and every click
+# opens the menu rather than activating directly. See
+# tools/BLE_CONNECTION_RELIABILITY.md-style notes in the git log for this
+# file if picking this fight again.
 import pystray
 from PIL import Image, ImageDraw
 
