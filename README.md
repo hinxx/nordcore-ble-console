@@ -173,6 +173,8 @@ Closing the window minimizes it to a system tray icon (`pystray`, forced to the 
 
 `pip install bleak matplotlib pystray pillow && python3 tools/treadmill_app.py`.
 
+The tray icon needs `gi` (PyGObject) for its GTK bindings -- that's a system package (`python3-gi`, `gir1.2-appindicator3-0.1` or `gir1.2-ayatanaappindicator3-0.1`), not something `pip install` can pull in on its own. If running from a venv, create it with `python3 -m venv --system-site-packages .venv` (or flip `include-system-site-packages` to `true` in an existing venv's `pyvenv.cfg`) so it can see the system's `gi`, otherwise `import pystray` fails with `ImportError: this platform is not supported: No module named 'gi'`.
+
 If any of these tools suddenly can't connect (scan fails, or connects then immediately fails with `BleakError: failed to discover services`), see `tools/BLE_CONNECTION_RELIABILITY.md` -- a known, recurring class of Linux/BlueZ-side connection fragility, unrelated to the board itself, with a quick diagnostic checklist and the fix for each cause found so far.
 
 Per `fw/controller/DESIGN.md`'s staged rollout, test any command with the belt unloaded and nobody on it before anything else — every tool here sends exactly what it's told, whenever it's told, with no safety gating of its own.
