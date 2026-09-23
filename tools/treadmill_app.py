@@ -620,6 +620,17 @@ class ControlTab:
 
     def on_telemetry(self, tenths_est: int, steps: int) -> None:
         self.telemetry_var.set(f"Speed: {tenths_est / 10:.1f} km/h   Steps: {steps}")
+        if not self.running and self.connected and tenths_est > 0:
+            # The belt is already moving -- e.g. the app (re)started or
+            # reconnected mid-walk. Sync up to that instead of requiring a
+            # Play click to tell the machine to do what it's already doing:
+            # PLAY/SET_SPEED would just re-target the same speed it's
+            # already holding.
+            self.running = True
+            self.target_tenths = min(max(tenths_est, SPEED_MIN_TENTHS), SPEED_MAX_TENTHS)
+            self.target_var.set(self._target_text())
+            self._set_controls_enabled(connected=self.connected, running=self.running)
+            self.status_var.set("Belt already moving -- synced up, no need to press Play.")
         if self.running and steps != self._last_seen_steps:
             self._last_step_change_time = time.monotonic()
         self._last_seen_steps = steps
