@@ -42,6 +42,7 @@ Requires: pip install bleak matplotlib pystray pillow
 """
 
 import asyncio
+import os
 import queue
 import sqlite3
 import subprocess
@@ -58,6 +59,17 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+# pystray's default Linux backend order is appindicator, then gtk -- but the
+# AppIndicator/StatusNotifierItem backend has two problems for this app: its
+# dynamic icon updates are unreliable through most SN watchers (well-known
+# pystray/Linux limitation), and it hardcodes HAS_DEFAULT_ACTION = False, so
+# every click just opens the menu -- there's no click-to-activate. The plain
+# GTK StatusIcon backend (the older XEmbed systray protocol) does both
+# correctly: set_from_file() reliably repaints on every update, and a plain
+# left-click fires 'activate' (the default menu item) directly, with
+# right-click for the full menu. setdefault so an explicit override in the
+# environment still wins.
+os.environ.setdefault("PYSTRAY_BACKEND", "gtk")
 import pystray
 from PIL import Image, ImageDraw
 
