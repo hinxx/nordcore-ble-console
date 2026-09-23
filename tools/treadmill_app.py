@@ -31,7 +31,14 @@ SAFETY: fw/controller/DESIGN.md's staged rollout calls for testing with the
 belt unloaded before anything else. This app has no opinion on that -- it
 sends exactly what you click, whenever you click it.
 
-Requires: pip install bleak matplotlib
+Closing the window minimizes to an XFCE4/AppIndicator system tray icon
+instead of quitting -- the BLE connection and history logging keep running
+in the background. The icon's color and hover tooltip reflect live state
+(disconnected / connected-idle / running, plus current speed and this
+session's step count); the tray menu has "Show Treadmill" (also the
+default/click action) and "Quit" (the only way to actually exit).
+
+Requires: pip install bleak matplotlib pystray pillow
 """
 
 import asyncio
@@ -49,6 +56,9 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+
+import pystray
+from PIL import Image, ImageDraw
 
 from bleak import BleakClient, BleakScanner
 
@@ -79,6 +89,23 @@ SETTING_HEIGHT_CM = "height_cm"
 # day boundary -- not actual walking. Comfortably above the real ~200-220ms
 # BASE->CON heartbeat cadence (README/DESIGN.md), even with some BLE jitter.
 MAX_INTEGRATION_GAP_S = 3.0
+
+# Tray icon dot colors -- this app has no distinct "paused" state (only
+# connected/idle and running), so the tray simplifies to three states.
+TRAY_COLOR_DISCONNECTED = "#9e9e9e"
+TRAY_COLOR_IDLE = "#4c72b0"
+TRAY_COLOR_RUNNING = "#2e8b57"
+
+
+def make_tray_image(color: str) -> "Image.Image":
+    """A simple filled dot on a transparent square, crisp at panel sizes."""
+    size = 64
+    margin = 6
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((margin, margin, size - margin, size - margin), fill=color, outline="white", width=3)
+    return img
+
 
 # The hardware step count can be unreliable (missed/duplicate footfalls at
 # certain speeds) -- see the discussion that prompted this. STEP_LENGTH_FACTOR
@@ -779,11 +806,79 @@ class App:
         notebook.add(self.history_tab.frame, text="History")
         notebook.add(self.settings_tab.frame, text="Settings")
 
-        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Session step tracking for the tray tooltip's "Last session" line --
+        # reset to 0 when ControlTab.running goes False->True, frozen into
+        # _last_session_steps on the True->False edge. Detected in
+        # _poll_events since running can change (Play/Stop/auto-stop)
+        # without a telemetry event in the same tick.
+        self._was_running = False
+        self._session_steps = 0
+        self._last_session_steps = 0
+        self._last_tenths_est = 0
+
+        self._tray_last_color: str | None = None
+        self._tray_last_title: str | None = None
+        self.tray_icon = self._build_tray_icon()
+        self.tray_icon.run_detached()
+
+        # Closing the window minimizes to tray instead of quitting; only the
+        # tray's own "Quit" item calls _quit().
+        root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
         self.worker.start()
         self.root.after(100, self._poll_events)
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
+
+    def _tray_color(self) -> str:
+        if not self.control_tab.connected:
+            return TRAY_COLOR_DISCONNECTED
+        return TRAY_COLOR_RUNNING if self.control_tab.running else TRAY_COLOR_IDLE
+
+    def _tray_title(self) -> str:
+        if not self.control_tab.connected:
+            return "TreadmillController\nDisconnected"
+        if self.control_tab.running:
+            speed = self._last_tenths_est / 10
+            return (
+                f"TreadmillController\nRunning at {speed:.1f} km/h\n"
+                f"This session: {self._session_steps} steps"
+            )
+        last = f"\nLast session: {self._last_session_steps} steps" if self._last_session_steps else ""
+        return f"TreadmillController\nIdle (connected){last}"
+
+    def _build_tray_icon(self) -> pystray.Icon:
+        menu = pystray.Menu(
+            pystray.MenuItem("Show Treadmill", self._on_tray_show, default=True),
+            pystray.MenuItem("Quit", self._on_tray_quit),
+        )
+        return pystray.Icon("treadmill", make_tray_image(self._tray_color()), self._tray_title(), menu)
+
+    def _on_tray_show(self, icon, item) -> None:
+        # Runs on pystray's own icon thread -- marshal onto the Tk thread via
+        # the same events queue BLEWorker already uses, rather than touching
+        # Tk widgets directly from here.
+        self.events.put(("tray_show",))
+
+    def _on_tray_quit(self, icon, item) -> None:
+        self.events.put(("tray_quit",))
+
+    def _show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _hide_to_tray(self) -> None:
+        self.root.withdraw()
+
+    def _update_tray(self) -> None:
+        color = self._tray_color()
+        if color != self._tray_last_color:
+            self.tray_icon.icon = make_tray_image(color)
+            self._tray_last_color = color
+        title = self._tray_title()
+        if title != self._tray_last_title:
+            self.tray_icon.title = title
+            self._tray_last_title = title
 
     def _step_length_m(self) -> float:
         try:
@@ -795,6 +890,13 @@ class App:
         return height_to_step_length_m(height_cm)
 
     def _poll_events(self) -> None:
+        running_now = self.control_tab.running
+        if running_now and not self._was_running:
+            self._session_steps = 0
+        elif not running_now and self._was_running:
+            self._last_session_steps = self._session_steps
+        self._was_running = running_now
+
         try:
             while True:
                 kind, *rest = self.events.get_nowait()
@@ -806,15 +908,25 @@ class App:
                     tenths_est, steps, delta, ts = rest
                     self.control_tab.on_telemetry(tenths_est, steps)
                     self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                    self._last_tenths_est = tenths_est
+                    if self.control_tab.running:
+                        self._session_steps += delta
+                elif kind == "tray_show":
+                    self._show_window()
+                elif kind == "tray_quit":
+                    self._quit()
+                    return
         except queue.Empty:
             pass
+        self._update_tray()
         self.root.after(100, self._poll_events)
 
     def _refresh_history_periodically(self) -> None:
         self.history_tab.refresh()
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
 
-    def _on_close(self) -> None:
+    def _quit(self) -> None:
+        self.tray_icon.stop()
         self.worker.disconnect_blocking()
         self.db.close()
         self.root.destroy()
