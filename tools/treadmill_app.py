@@ -61,19 +61,28 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-# Forcing PYSTRAY_BACKEND=gtk (the older XEmbed StatusIcon protocol) was
-# tried here to fix two AppIndicator-backend issues (unreliable dynamic icon
-# updates, no click-to-activate) -- but this host's xfce4-panel "systray"
-# plugin (the XEmbed host that backend needs) crashed under it
-# (systemd-coredump: panel-8-systray) and didn't come back even after a
-# panel restart + manual remove/re-add. Reverted to pystray's default
-# backend order (appindicator first, hosted here by xapp-status-plugin,
-# which was never implicated in that crash) -- a known-previously-visible
-# baseline, even though its icon doesn't repaint reliably and every click
-# opens the menu rather than activating directly. See
-# tools/BLE_CONNECTION_RELIABILITY.md-style notes in the git log for this
-# file if picking this fight again.
+# The tray icon never actually appeared at all, under any backend, until
+# this was found: pystray's Icon.run_detached() does NOT run its own GTK
+# main loop -- its docstring says to call it "before entering the mainloop
+# of the other library" (assuming that other library's loop pumps GLib's
+# default main context, as Qt/wx integrations do). Tkinter's mainloop is a
+# separate Tcl event loop that never touches GLib at all, so nothing ever
+# dispatched the idle callbacks pystray schedules for icon creation,
+# updates, or menu handling -- confirmed directly: a raw AppIndicator3 test
+# using a real Gtk.main() registered fine with org.kde.StatusNotifierWatcher
+# (visible via `dbus-send ... RegisteredStatusNotifierItems`), while the
+# exact same call through pystray.Icon.run_detached() alongside Tk's
+# mainloop never registered at all. App._pump_glib() below is what makes
+# this actually work -- it iterates GLib's default main context from a
+# Tkinter after() callback, standard practice for combining a GLib-based
+# library with a non-GLib host main loop. Forcing PYSTRAY_BACKEND=gtk (the
+# older XEmbed StatusIcon protocol) was tried earlier as an (incorrect, it
+# turned out) fix for a different suspected cause, and crashed this host's
+# xfce4-panel "systray" plugin (systemd-coredump: panel-8-systray) --
+# stick with the default appindicator backend (hosted here by
+# xapp-status-plugin) rather than revisiting that.
 import pystray
+from gi.repository import GLib
 from PIL import Image, ImageDraw
 
 from bleak import BleakClient, BleakScanner
@@ -893,6 +902,8 @@ class App:
         self._tray_last_title: str | None = None
         self.tray_icon = self._build_tray_icon()
         self.tray_icon.run_detached()
+        self._glib_context = GLib.MainContext.default()
+        self.root.after(50, self._pump_glib)
 
         # Closing the window minimizes to tray instead of quitting; only the
         # tray's own "Quit" item calls _quit().
@@ -901,6 +912,14 @@ class App:
         self.worker.start()
         self.root.after(100, self._poll_events)
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
+
+    def _pump_glib(self) -> None:
+        # See the comment above the `pystray` import -- without this,
+        # pystray's tray icon never actually registers with the desktop at
+        # all, since Tkinter's own mainloop never touches GLib's.
+        while self._glib_context.pending():
+            self._glib_context.iteration(False)
+        self.root.after(50, self._pump_glib)
 
     def _tray_color(self) -> str:
         if not self.control_tab.connected:
