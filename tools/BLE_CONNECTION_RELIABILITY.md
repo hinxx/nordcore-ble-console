@@ -1,6 +1,8 @@
-# BLE connection reliability on this Linux host — known fragile, not yet fixed
+# BLE connection reliability on this Linux host — known fragile, partially self-healed
 
-**Status: open, recurring, not root-caused to a permanent fix.** Separate from
+**Status: cause #1 self-heals automatically in `treadmill_app.py` (see
+below); cause #2 and blueman-manager itself are still open, not root-caused
+to a permanent fix.** Separate from
 `fw/controller/BLE_NOTIFY_LATENCY_INVESTIGATION.md` (which is about telemetry
 *timing* once connected, and is resolved) -- this is about the connection
 itself frequently failing to establish at all, or refusing a reconnect,
@@ -77,18 +79,37 @@ ps aux | grep blueman-manager                 # is it running and holding it?
   disconnected` -> almost certainly cause #2. `bluetoothctl remove <mac>`,
   reconnect unbonded.
 
+## Self-healing for cause #1 (`tools/treadmill_app.py` only)
+
+`BLEWorker._connect()` now runs `_clear_stale_connection()` before every
+scan: it looks up the device's MAC via `bluetoothctl devices`, checks
+`bluetoothctl info <mac>` for `Connected: yes`, and if so runs
+`bluetoothctl disconnect <mac>` -- exactly the manual fix above, just run
+automatically on every connect/reconnect instead of requiring a human to
+notice and run it. This has to happen *before* scanning, not in response to
+a failed one, since a stale OS-side connection means the board isn't
+advertising and the scan would simply never find it. It's a no-op (and
+silent) when nothing's stuck, and silently skips itself if `bluetoothctl`
+isn't on PATH -- best-effort, not a hard requirement to run the app.
+
+This only covers cause #1. Cause #2 (stale bonds) isn't self-healed --
+`bluetoothctl remove <mac>` is destructive (drops the bond entirely) in a
+way a background reconnect shouldn't do unprompted, so that one still needs
+a human to recognize the `BleakError: failed to discover services`
+symptom and run the fix above. `controller_ui.py` also doesn't get this
+fix -- it stays deliberately unmodified (see its own header comment).
+
 ## Not yet done
 
-- No permanent fix that doesn't trade away the Bluetooth Devices GUI
-  (masking `blueman-manager.service`) or drop bonding entirely (removing the
-  bond each time it goes stale). Haven't found a way to keep both blueman's
-  GUI *and* reliable exclusive access to this device.
+- No permanent fix for cause #1 that doesn't trade away the Bluetooth
+  Devices GUI (masking `blueman-manager.service`) -- the self-heal above
+  avoids needing that tradeoff for `treadmill_app.py`, but blueman is still
+  free to grab the connection first each time; the app just clears it
+  automatically now instead of failing.
+- No fix, automatic or otherwise, that drops bonding entirely as a
+  permanent state (removing the bond each time it goes stale, for cause
+  #2, is still a per-incident manual step).
 - Root cause of *why* the bond goes stale (not just that it does) isn't
   pinned down -- worth a closer look if this keeps recurring, since knowing
   the trigger might turn "remove and reconnect" into an actual fix instead
   of a recurring workaround.
-- Whether `tools/treadmill_app.py`/`controller_ui.py` should detect this
-  class of failure automatically (e.g., a connect failure that looks like a
-  stale bond or a stuck BlueZ-side connection) and self-heal by running the
-  equivalent of the checklist above, instead of requiring manual
-  intervention every time, is an open question -- not implemented.

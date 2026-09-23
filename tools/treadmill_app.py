@@ -44,6 +44,7 @@ Requires: pip install bleak matplotlib pystray pillow
 import asyncio
 import queue
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -309,6 +310,50 @@ def estimate_distance_km(rows) -> float:
     return total_km
 
 
+def _clear_stale_connection(name: str) -> bool:
+    """Best-effort self-heal for tools/BLE_CONNECTION_RELIABILITY.md's cause
+    #1: blueman-manager (or anything else on this host) grabbing a GATT
+    connection to the device in the background. The board won't
+    re-advertise while it thinks it's connected
+    (fw/controller/main/ble_gatt.c's ADV_COMPLETE handling), so a stale
+    OS-side connection makes BleakScanner fail to find the device at all --
+    this has to run *before* scanning, not in response to a failed scan.
+    Mirrors the exact manual fix from that doc: find the MAC by name, check
+    if BlueZ already thinks it's connected, and if so disconnect it.
+    Returns True only if it actually cleared something, so callers can stay
+    quiet in the common case. Silently does nothing if bluetoothctl isn't
+    available -- this is a convenience, not a requirement to run the app."""
+    try:
+        listing = subprocess.run(
+            ["bluetoothctl", "devices"], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    mac = None
+    for line in listing.stdout.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) == 3 and parts[0] == "Device" and parts[2] == name:
+            mac = parts[1]
+            break
+    if mac is None:
+        return False
+    try:
+        info = subprocess.run(
+            ["bluetoothctl", "info", mac], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if "Connected: yes" not in info.stdout:
+        return False
+    try:
+        subprocess.run(
+            ["bluetoothctl", "disconnect", mac], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
 class BLEWorker:
     """Owns the asyncio loop + BleakClient on a background thread, same
     approach as controller_ui.py. Additionally computes a reset-aware step
@@ -362,6 +407,8 @@ class BLEWorker:
         self.events.put(("telemetry", tenths_est, steps, delta, time.time()))
 
     async def _connect(self) -> None:
+        if await asyncio.to_thread(_clear_stale_connection, DEVICE_NAME):
+            self.events.put(("status", "Cleared a stale connection (e.g. blueman-manager) before scanning..."))
         self.events.put(("status", f"Scanning for '{DEVICE_NAME}'..."))
         device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT_S)
         if device is None:
