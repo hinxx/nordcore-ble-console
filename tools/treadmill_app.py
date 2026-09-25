@@ -210,7 +210,10 @@ class HistoryDB:
             "SELECT ts, speed_tenths FROM samples ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
-    def add_sample(self, ts: float, speed_tenths: int, step_delta: int, step_length_m: float) -> None:
+    def add_sample(self, ts: float, speed_tenths: int, step_delta: int, step_length_m: float) -> float:
+        """Returns this sample's own est_step_delta so a live caller (the
+        Control tab) can accumulate a running estimate without a separate
+        query, in the same units/gap-skipping logic as the stored history."""
         est_step_delta = 0.0
         if self._last_sample is not None:
             prev_ts, prev_speed_tenths = self._last_sample
@@ -226,6 +229,7 @@ class HistoryDB:
             (ts, speed_tenths, step_delta, est_step_delta),
         )
         self.conn.commit()
+        return est_step_delta
 
     def get_setting(self, key: str, default: str) -> str:
         row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -534,6 +538,11 @@ class ControlTab:
         self.target_tenths = SPEED_MIN_TENTHS
         self._last_seen_steps: int | None = None
         self._last_step_change_time = time.monotonic()
+        # Speed-derived estimate, accumulated live alongside the hardware's
+        # own count for an at-a-glance comparison -- reset together with it
+        # (steps == 0 is the firmware's own real-stop/reboot reset signal,
+        # see decode_telemetry), so the two numbers describe the same walk.
+        self._estimated_steps = 0.0
 
         self.frame = ttk.Frame(notebook)
         pad = {"padx": 10, "pady": 6}
@@ -543,7 +552,7 @@ class ControlTab:
             row=0, column=0, columnspan=3, sticky="w", **pad
         )
 
-        self.telemetry_var = tk.StringVar(value="Speed: -- km/h   Steps: --")
+        self.telemetry_var = tk.StringVar(value="Speed: -- km/h   Steps: -- (est: --)")
         ttk.Label(self.frame, textvariable=self.telemetry_var, font=("", 11)).grid(
             row=1, column=0, columnspan=3, sticky="w", **pad
         )
@@ -642,8 +651,14 @@ class ControlTab:
             self.running = False
         self._set_controls_enabled(connected=self.connected, running=self.running)
 
-    def on_telemetry(self, tenths_est: int, steps: int) -> None:
-        self.telemetry_var.set(f"Speed: {tenths_est / 10:.1f} km/h   Steps: {steps}")
+    def on_telemetry(self, tenths_est: int, steps: int, est_delta: float = 0.0) -> None:
+        if steps == 0:
+            self._estimated_steps = 0.0  # firmware's own real-stop/reboot reset
+        else:
+            self._estimated_steps += est_delta
+        self.telemetry_var.set(
+            f"Speed: {tenths_est / 10:.1f} km/h   Steps: {steps}  (est: {self._estimated_steps:.0f})"
+        )
         if not self.running and self.connected and tenths_est > 0:
             # The belt is already moving -- e.g. the app (re)started or
             # reconnected mid-walk. Sync up to that instead of requiring a
@@ -998,8 +1013,8 @@ class App:
                     self.control_tab.on_connected(rest[0])
                 elif kind == "telemetry":
                     tenths_est, steps, delta, ts = rest
-                    self.control_tab.on_telemetry(tenths_est, steps)
-                    self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                    est_delta = self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                    self.control_tab.on_telemetry(tenths_est, steps, est_delta)
                     self._last_tenths_est = tenths_est
                     if self.control_tab.running:
                         self._session_steps += delta
