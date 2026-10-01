@@ -262,6 +262,22 @@ ran late), `BURST` (>3 updates drained in one GUI pass) and `DB` (a
 history write took >20ms). Thresholds are the `*_WARN_*` constants near the
 top of the file.
 
+**The Delivery log's first real catch (a separate, GUI-side cause)**: its
+first long run showed no `LATE`/`LOST` lines at all -- BLE delivery was
+on time and nothing was lost -- but a `STALL` of ~3.3s followed by a
+`BURST` of ~15 queued updates every ~33.3s, exactly the History tab's 30s
+refresh timer plus its own ~3.3s runtime. The refresh ran several
+full-table scans (`date(ts, ...)` over ~2.76M rows, since every idle
+sample is logged too) synchronously on the Tk thread, freezing the live
+display until it finished. Fixed by running those queries on a worker
+thread with a read-only connection, only while the History tab is visible,
+and skipping the chart redraw when nothing changed. Worth knowing when
+reading older notes here: some of the "bursty" behaviour seen from the app
+over time may have been this, independent of the ground-path BLE problem.
+Still open as a design smell: storing every idle sample is what makes the
+table (and these scans) big -- a daily rollup table, or not logging
+zero-speed/zero-delta samples, would fix that at the root.
+
 Originally left in deliberately, in case this investigation resumed:
 
 - **`tools/treadmill_app.py`** (removed as of the update above):

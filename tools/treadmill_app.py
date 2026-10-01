@@ -182,8 +182,16 @@ class HistoryDB:
 
     _METRIC_COLUMNS = {"hardware": "step_delta", "estimated": "est_step_delta"}
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, readonly: bool = False):
+        self.path = path
         self.conn = sqlite3.connect(path)
+        if readonly:
+            # Per-thread connection for background History queries (a sqlite3
+            # connection can't be shared across threads): no schema work, and
+            # it can't write even by accident.
+            self.conn.execute("PRAGMA query_only=ON")
+            self._last_sample = None
+            return
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(
             """
@@ -345,6 +353,53 @@ def estimate_distance_km(rows) -> float:
         avg_kmh = (s0 + s1) / 2.0 / 10.0
         total_km += avg_kmh * dt / 3600.0
     return total_km
+
+
+def history_summary_text(db: HistoryDB) -> str:
+    """The History tab's summary block. Runs on a worker thread against its
+    own read-only connection -- these are full-table scans (every idle
+    sample is logged too, millions of rows after a couple of weeks), a few
+    seconds in total, which used to freeze the whole GUI when they ran on
+    the Tk thread (see the Delivery log's STALL/BURST lines)."""
+    now = datetime.now()
+    today_start = datetime(now.year, now.month, now.day).timestamp()
+    today_km = estimate_distance_km(db.samples_since(today_start))
+
+    since_ts = db.tracking_since()
+    since_str = "no data yet" if since_ts is None else datetime.fromtimestamp(since_ts).strftime("%Y-%m-%d")
+
+    def both(fn) -> str:
+        hw = fn(metric="hardware")
+        est = fn(metric="estimated")
+        return f"{hw:.0f} hardware / {est:.0f} estimated"
+
+    return (
+        f"Today: {both(db.today_steps)} steps, {today_km:.2f} km\n"
+        f"This week: {both(db.current_week_steps)} steps\n"
+        f"All-time: {both(db.total_steps)} steps (tracking since {since_str})"
+    )
+
+
+def history_chart_data(db: HistoryDB, view: str, metric: str):
+    """(labels, values, title, tick_step) for the History bar chart. Worker
+    thread, like history_summary_text."""
+    metric_label = "hardware" if metric == "hardware" else "estimated"
+    if view == "today":
+        rows = db.hourly_totals_today(metric=metric)
+        labels = [hour for hour, _steps in rows]
+        title = f"{metric_label.capitalize()} steps by hour (today)"
+        tick_step = 2  # 24 bars is crowded -- label every other hour
+    elif view == "daily":
+        rows = db.daily_totals(days=14, metric=metric)
+        labels = [day[5:] for day, _steps in rows]  # MM-DD
+        title = f"{metric_label.capitalize()} steps per day (last 14 days)"
+        tick_step = 1
+    else:
+        rows = db.weekly_totals(weeks=12, metric=metric)
+        labels = [week for week, _steps in rows]
+        title = f"{metric_label.capitalize()} steps per week (last 12 weeks)"
+        tick_step = 1
+    return labels, [steps or 0 for _label, steps in rows], title, tick_step
 
 
 def _clear_stale_connection(name: str) -> bool:
@@ -809,15 +864,15 @@ class HistoryTab:
         toggle_frame = ttk.Frame(self.frame)
         toggle_frame.grid(row=1, column=0, sticky="w", **pad)
         ttk.Radiobutton(toggle_frame, text="Today (by hour)", variable=self.view, value="today",
-                        command=self._refresh_chart).pack(side="left")
+                        command=self._request_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Daily", variable=self.view, value="daily",
-                        command=self._refresh_chart).pack(side="left")
+                        command=self._request_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Weekly", variable=self.view, value="weekly",
-                        command=self._refresh_chart).pack(side="left")
+                        command=self._request_chart).pack(side="left")
         ttk.Radiobutton(toggle_frame, text="Hardware steps", variable=self.metric, value="hardware",
-                        command=self._refresh_chart).pack(side="left", padx=(16, 0))
+                        command=self._request_chart).pack(side="left", padx=(16, 0))
         ttk.Radiobutton(toggle_frame, text="Estimated steps", variable=self.metric, value="estimated",
-                        command=self._refresh_chart).pack(side="left")
+                        command=self._request_chart).pack(side="left")
 
         ttk.Button(self.frame, text="Refresh", command=self.refresh).grid(row=1, column=2, sticky="e", **pad)
 
@@ -829,53 +884,76 @@ class HistoryTab:
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(2, weight=1)
 
-        self.refresh()
+        # Queries run on worker threads (see history_summary_text); results
+        # come back through this queue and are applied on the Tk thread by
+        # _poll_results, which only runs while a request is in flight. No
+        # refresh here -- App refreshes when this tab is actually shown.
+        self.db_path = db.path
+        self._results: "queue.Queue[tuple]" = queue.Queue()
+        self._inflight: set[str] = set()
+        self._dirty: set[str] = set()
+        self._polling = False
+        self._drawn = None
 
     def refresh(self) -> None:
-        self._refresh_summary()
-        self._refresh_chart()
+        self._request("summary")
+        self._request("chart")
 
-    def _refresh_summary(self) -> None:
-        now = datetime.now()
-        today_start = datetime(now.year, now.month, now.day).timestamp()
-        today_km = estimate_distance_km(self.db.samples_since(today_start))
+    def _request_chart(self) -> None:
+        self._request("chart")
 
-        since_ts = self.db.tracking_since()
-        since_str = "no data yet" if since_ts is None else datetime.fromtimestamp(since_ts).strftime("%Y-%m-%d")
+    def _request(self, kind: str) -> None:
+        if kind in self._inflight:
+            self._dirty.add(kind)  # rerun once with whatever is selected by then
+            return
+        self._inflight.add(kind)
+        threading.Thread(
+            target=self._work, args=(kind, self.view.get(), self.metric.get()), daemon=True
+        ).start()
+        if not self._polling:
+            self._polling = True
+            self.frame.after(50, self._poll_results)
 
-        def both(fn) -> str:
-            hw = fn(metric="hardware")
-            est = fn(metric="estimated")
-            return f"{hw:.0f} hardware / {est:.0f} estimated"
+    def _work(self, kind: str, view: str, metric: str) -> None:
+        try:
+            db = HistoryDB(self.db_path, readonly=True)
+            try:
+                if kind == "summary":
+                    result = history_summary_text(db)
+                else:
+                    result = history_chart_data(db, view, metric)
+            finally:
+                db.close()
+            self._results.put((kind, view, metric, "ok", result))
+        except Exception as exc:  # noqa: BLE001 -- shown in the summary line
+            self._results.put((kind, view, metric, "err", exc))
 
-        self.summary_var.set(
-            f"Today: {both(self.db.today_steps)} steps, {today_km:.2f} km\n"
-            f"This week: {both(self.db.current_week_steps)} steps\n"
-            f"All-time: {both(self.db.total_steps)} steps (tracking since {since_str})"
-        )
-
-    def _refresh_chart(self) -> None:
-        self.ax.clear()
-        metric = self.metric.get()
-        metric_label = "hardware" if metric == "hardware" else "estimated"
-        view = self.view.get()
-        if view == "today":
-            rows = self.db.hourly_totals_today(metric=metric)
-            labels = [hour for hour, _steps in rows]
-            title = f"{metric_label.capitalize()} steps by hour (today)"
-            tick_step = 2  # 24 bars is crowded -- label every other hour
-        elif view == "daily":
-            rows = self.db.daily_totals(days=14, metric=metric)
-            labels = [day[5:] for day, _steps in rows]  # MM-DD
-            title = f"{metric_label.capitalize()} steps per day (last 14 days)"
-            tick_step = 1
+    def _poll_results(self) -> None:
+        try:
+            while True:
+                kind, view, metric, status, payload = self._results.get_nowait()
+                self._inflight.discard(kind)
+                if status == "err":
+                    self.summary_var.set(f"History query failed: {payload}")
+                elif kind == "summary":
+                    self.summary_var.set(payload)
+                elif (view, metric) == (self.view.get(), self.metric.get()):
+                    self._draw_chart(payload)  # else: stale, a rerun is already queued
+                if kind in self._dirty:
+                    self._dirty.discard(kind)
+                    self._request(kind)
+        except queue.Empty:
+            pass
+        if self._inflight:
+            self.frame.after(50, self._poll_results)
         else:
-            rows = self.db.weekly_totals(weeks=12, metric=metric)
-            labels = [week for week, _steps in rows]
-            title = f"{metric_label.capitalize()} steps per week (last 12 weeks)"
-            tick_step = 1
+            self._polling = False
 
-        values = [steps or 0 for _label, steps in rows]
+    def _draw_chart(self, data) -> None:
+        if data == self._drawn:
+            return  # nothing changed since the last draw -- skip the redraw
+        labels, values, title, tick_step = data
+        self.ax.clear()
         self.ax.bar(labels, values, color="#4C72B0")
         self.ax.set_title(title)
         self.ax.set_ylabel("steps")
@@ -884,6 +962,7 @@ class HistoryTab:
         self.ax.tick_params(axis="x", rotation=45, labelsize=8)
         self.figure.tight_layout()
         self.canvas.draw()
+        self._drawn = data
 
 
 class SettingsTab:
@@ -976,6 +1055,7 @@ class App:
 
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
+        self.notebook = notebook
 
         self.settings_tab = SettingsTab(notebook, self.db)
         self.control_tab = ControlTab(
@@ -985,6 +1065,10 @@ class App:
         notebook.add(self.control_tab.frame, text="Control")
         notebook.add(self.history_tab.frame, text="History")
         notebook.add(self.settings_tab.frame, text="Settings")
+        notebook.bind("<<NotebookTabChanged>>", lambda _e: self._refresh_history_if_visible())
+        # Also when the window comes back from the tray/minimized (mapping is
+        # asynchronous, so this can't just be checked right after deiconify()).
+        root.bind("<Map>", lambda e: self._refresh_history_if_visible() if e.widget is root else None)
 
         # Session step tracking for the tray tooltip's "Last session" line --
         # reset to 0 when ControlTab.running goes False->True, frozen into
@@ -1139,8 +1223,17 @@ class App:
         self._update_tray()
         self.root.after(100, self._poll_events)
 
+    def _history_visible(self) -> bool:
+        return bool(self.root.winfo_viewable()) and self.notebook.select() == str(self.history_tab.frame)
+
+    def _refresh_history_if_visible(self) -> None:
+        # Nothing to refresh (and no point spending seconds of queries on a
+        # multi-million-row table) unless someone can actually see it.
+        if self._history_visible():
+            self.history_tab.refresh()
+
     def _refresh_history_periodically(self) -> None:
-        self.history_tab.refresh()
+        self._refresh_history_if_visible()
         self.root.after(self.HISTORY_REFRESH_MS, self._refresh_history_periodically)
 
     def _quit(self) -> None:
