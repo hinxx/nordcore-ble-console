@@ -115,6 +115,15 @@ SETTING_HEIGHT_CM = "height_cm"
 # BASE->CON heartbeat cadence (README/DESIGN.md), even with some BLE jitter.
 MAX_INTEGRATION_GAP_S = 3.0
 
+# Thresholds for the Control tab's "Delivery log" (late/lost/bursty telemetry
+# -- see fw/controller/BLE_NOTIFY_LATENCY_INVESTIGATION.md). Normal telemetry
+# cadence is ~200-225ms, and the real bursts that investigation chased ran
+# ~1.8s apart, so 0.5s is well clear of normal jitter but catches those.
+DELAY_WARN_S = 0.5       # no notification reached the app for this long
+GUI_STALL_WARN_S = 0.25  # GUI event poll (scheduled every 100ms) ran this late
+BURST_WARN_COUNT = 3     # telemetry updates drained in a single GUI poll pass
+DB_SLOW_WARN_MS = 20     # one history write took this long
+
 # Tray icon dot colors -- this app has no distinct "paused" state (only
 # connected/idle and running), so the tray simplifies to three states.
 TRAY_COLOR_DISCONNECTED = "#9e9e9e"
@@ -396,6 +405,9 @@ class BLEWorker:
         self.client: BleakClient | None = None
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self._last_steps: int | None = None
+        # Delivery-log state, only touched on the BLE loop thread.
+        self._last_cb_mono: float | None = None
+        self._last_seq: int | None = None
 
     def start(self) -> None:
         self.thread.start()
@@ -407,10 +419,45 @@ class BLEWorker:
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._last_steps = None  # next reconnect starts a fresh local segment
+        self._last_cb_mono = None  # ...and a reconnect isn't a "late" notification
+        self._last_seq = None
         self.events.put(("status", "Disconnected."))
         self.events.put(("connected", False))
 
+    def _diag(self, text: str) -> None:
+        self.events.put(("diag", time.time(), text))
+
+    def _check_delivery(self, data: bytearray) -> None:
+        """Observation only: reports late and lost notifications to the
+        Delivery log, never changes behavior. Bytes 5/6 of the TELEMETRY
+        record (fw/controller/main/ble_gatt.c) are a per-attempt sequence
+        number and the previous notify call's return code -- a jump in the
+        sequence means a notification the firmware attempted never reached
+        us (lost); an intact sequence across a long gap means everything
+        arrived, just late. Older firmware sends 5 bytes and has neither."""
+        now = time.monotonic()
+        prev_cb, self._last_cb_mono = self._last_cb_mono, now
+        seq = data[5] if len(data) >= 6 else None
+        rc = data[6] if len(data) >= 7 else 0
+        prev_seq, self._last_seq = self._last_seq, seq
+        rc_note = f", firmware notify rc={rc}" if rc else ""
+
+        missing = 0
+        if seq is not None and prev_seq is not None:
+            expected = (prev_seq + 1) & 0xFF
+            missing = (seq - expected) & 0xFF
+            if missing:
+                self._diag(
+                    f"LOST  {missing} notification(s) never reached the app "
+                    f"(firmware seq {expected} -> {seq}{rc_note})"
+                )
+
+        if prev_cb is not None and now - prev_cb > DELAY_WARN_S:
+            verdict = " -- firmware seq intact: delayed, not lost" if seq is not None and not missing else ""
+            self._diag(f"LATE  nothing received for {now - prev_cb:.2f}s{verdict}{rc_note}")
+
     def _on_telemetry(self, _sender, data: bytearray) -> None:
+        self._check_delivery(data)
         decoded = decode_telemetry(bytes(data))
         if decoded is None:
             return
@@ -435,6 +482,8 @@ class BLEWorker:
         self.events.put(("telemetry", tenths_est, steps, delta, time.time()))
 
     async def _connect(self) -> None:
+        self._last_cb_mono = None
+        self._last_seq = None
         if await asyncio.to_thread(_clear_stale_connection, DEVICE_NAME):
             self.events.put(("status", "Cleared a stale connection (e.g. blueman-manager) before scanning..."))
         self.events.put(("status", f"Scanning for '{DEVICE_NAME}'..."))
@@ -582,6 +631,24 @@ class ControlTab:
         self.reconnect_btn = ttk.Button(self.frame, text="Reconnect", command=self._on_reconnect)
         self.reconnect_btn.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
 
+        # Always-on, observation-only log of late/lost/bursty telemetry, so
+        # it can be reviewed after the fact even when the window was
+        # minimized to the tray while it happened.
+        log_frame = ttk.LabelFrame(self.frame, text="Delivery log (late / lost / bursty telemetry)")
+        log_frame.grid(row=7, column=0, columnspan=3, sticky="ew", padx=10, pady=(6, 10))
+        self.diag_text = tk.Text(
+            log_frame, height=10, width=70, wrap="word", state="disabled", font="TkFixedFont"
+        )
+        diag_scroll = ttk.Scrollbar(log_frame, command=self.diag_text.yview)
+        self.diag_text.configure(yscrollcommand=diag_scroll.set)
+        self.diag_text.pack(side="left", fill="both", expand=True)
+        diag_scroll.pack(side="right", fill="y")
+        self.log_diag(
+            time.time(),
+            f"watching: no telemetry >{DELAY_WARN_S:g}s, GUI stall >{GUI_STALL_WARN_S * 1000:.0f}ms, "
+            f">{BURST_WARN_COUNT} updates in one pass, DB write >{DB_SLOW_WARN_MS}ms",
+        )
+
         # Play speed and auto-stop timeout live on the Settings tab (owned
         # and persisted by SettingsTab) -- play_speed_var/auto_stop_var
         # here are that tab's own StringVars, shared by reference, not
@@ -589,6 +656,22 @@ class ControlTab:
 
         self._set_controls_enabled(connected=False, running=False)
         self.frame.after(self.AUTO_STOP_CHECK_MS, self._check_auto_stop)
+
+    DIAG_MAX_LINES = 500
+
+    def log_diag(self, ts: float, text: str) -> None:
+        stamp = datetime.fromtimestamp(ts).strftime("%H:%M:%S.%f")[:-3]
+        # Only follow new lines if already scrolled to the bottom -- don't
+        # yank the view away while someone is scrolled up reading history.
+        at_bottom = self.diag_text.yview()[1] >= 0.999
+        self.diag_text.configure(state="normal")
+        self.diag_text.insert("end", f"{stamp}  {text}\n")
+        total_lines = int(self.diag_text.index("end-1c").split(".")[0])
+        if total_lines > self.DIAG_MAX_LINES:
+            self.diag_text.delete("1.0", f"{total_lines - self.DIAG_MAX_LINES + 1}.0")
+        self.diag_text.configure(state="disabled")
+        if at_bottom:
+            self.diag_text.see("end")
 
     def _target_text(self) -> str:
         return f"Target: {self.target_tenths / 10:.1f} km/h"
@@ -912,6 +995,7 @@ class App:
         self._session_steps = 0
         self._last_session_steps = 0
         self._last_tenths_est = 0
+        self._last_poll_mono: float | None = None
 
         self._tray_last_color: str | None = None
         self._tray_last_title: str | None = None
@@ -1004,6 +1088,20 @@ class App:
             self._last_session_steps = self._session_steps
         self._was_running = running_now
 
+        # Delivery-log detectors on the GUI side (observation only): this
+        # poll is scheduled every 100ms, so running much later means the Tk
+        # thread was busy; several telemetry updates draining in one pass is
+        # exactly what "bursty" looks like on screen.
+        now = time.monotonic()
+        if self._last_poll_mono is not None and now - self._last_poll_mono > GUI_STALL_WARN_S:
+            self.control_tab.log_diag(
+                time.time(),
+                f"STALL GUI thread busy: events handled {(now - self._last_poll_mono) * 1000:.0f}ms "
+                f"after the previous pass (scheduled every 100ms)",
+            )
+        self._last_poll_mono = now
+        telemetry_in_pass = 0
+
         try:
             while True:
                 kind, *rest = self.events.get_nowait()
@@ -1011,9 +1109,16 @@ class App:
                     self.control_tab.on_status(rest[0])
                 elif kind == "connected":
                     self.control_tab.on_connected(rest[0])
+                elif kind == "diag":
+                    self.control_tab.log_diag(*rest)
                 elif kind == "telemetry":
+                    telemetry_in_pass += 1
                     tenths_est, steps, delta, ts = rest
+                    t0 = time.monotonic()
                     est_delta = self.db.add_sample(ts, tenths_est, delta, self._step_length_m())
+                    write_ms = (time.monotonic() - t0) * 1000
+                    if write_ms > DB_SLOW_WARN_MS:
+                        self.control_tab.log_diag(time.time(), f"DB    history write took {write_ms:.0f}ms")
                     self.control_tab.on_telemetry(tenths_est, steps, est_delta)
                     self._last_tenths_est = tenths_est
                     if self.control_tab.running:
@@ -1025,6 +1130,12 @@ class App:
                     return
         except queue.Empty:
             pass
+        if telemetry_in_pass > BURST_WARN_COUNT:
+            self.control_tab.log_diag(
+                time.time(),
+                f"BURST {telemetry_in_pass} telemetry updates arrived together in one GUI pass "
+                f"(they were queued, not spread out)",
+            )
         self._update_tray()
         self.root.after(100, self._poll_events)
 

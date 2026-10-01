@@ -248,6 +248,20 @@ still in place -- see the second bullet below -- since they're purely
 additive to the wire format and don't carry the same "silently changes
 behavior" risk.
 
+**Later update**: because the ground-path issue can still recur on its own
+(and a console or minimized window hides it when it does), the same
+detectors are back in `tools/treadmill_app.py` as a permanent, always-on
+**Delivery log** at the bottom of the Control tab -- last ~500 lines kept,
+~10 visible, timestamped. Deliberately *not* a revival of the old
+instrumentation's failure mode: it is observation-only (no
+`TREADMILL_DEBUG_SKIP_DB`-style switch that changes behavior, no
+environment variable, nothing gated or silent). It reports `LATE` (no
+notification for >0.5s; with the firmware sequence intact it says
+"delayed, not lost"), `LOST` (firmware sequence jumped), `STALL` (GUI poll
+ran late), `BURST` (>3 updates drained in one GUI pass) and `DB` (a
+history write took >20ms). Thresholds are the `*_WARN_*` constants near the
+top of the file.
+
 Originally left in deliberately, in case this investigation resumed:
 
 - **`tools/treadmill_app.py`** (removed as of the update above):
