@@ -45,7 +45,10 @@ Requires: pip install bleak matplotlib pystray pillow
 """
 
 import asyncio
+import fcntl
+import os
 import queue
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -400,6 +403,26 @@ def history_chart_data(db: HistoryDB, view: str, metric: str):
         title = f"{metric_label.capitalize()} steps per week (last 12 weeks)"
         tick_step = 1
     return labels, [steps or 0 for _label, steps in rows], title, tick_step
+
+
+def acquire_single_instance_lock():
+    """(lock_fd, None) if this is the only instance, else (None, holder_pid).
+    Matters because the board takes one BLE connection at a time and
+    _clear_stale_connection() disconnects whatever holds it -- a second copy
+    (easy to start from a menu launcher while the first sits in the tray)
+    would knock the first one's live connection out. flock is released by
+    the kernel when the holder dies, so a crash can't leave a stale lock."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    fd = os.open(os.path.join(runtime_dir, "treadmill_app.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pid = os.read(fd, 32).decode().strip()
+        os.close(fd)
+        return None, pid
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    return fd, None
 
 
 def _clear_stale_connection(name: str) -> bool:
@@ -1080,6 +1103,11 @@ class App:
         self._last_session_steps = 0
         self._last_tenths_est = 0
         self._last_poll_mono: float | None = None
+        # A second launch (menu launcher) sends SIGUSR1 instead of starting
+        # another copy; the handler only sets a flag -- _poll_events acts on
+        # it from the Tk thread (a handler must not touch Tk or the queue).
+        self._show_requested = False
+        signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "_show_requested", True))
 
         self._tray_last_color: str | None = None
         self._tray_last_title: str | None = None
@@ -1165,6 +1193,9 @@ class App:
         return height_to_step_length_m(height_cm)
 
     def _poll_events(self) -> None:
+        if self._show_requested:
+            self._show_requested = False
+            self._show_window()
         running_now = self.control_tab.running
         if running_now and not self._was_running:
             self._session_steps = 0
@@ -1244,6 +1275,14 @@ class App:
 
 
 def main() -> None:
+    lock_fd, holder_pid = acquire_single_instance_lock()
+    if lock_fd is None:
+        try:
+            os.kill(int(holder_pid), signal.SIGUSR1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+        print("treadmill_app is already running -- asked it to show its window.")
+        return
     root = tk.Tk()
     App(root)
     try:

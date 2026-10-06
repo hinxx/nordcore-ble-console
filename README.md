@@ -173,6 +173,8 @@ Closing the window minimizes it to a system tray icon (`pystray`, AppIndicator b
 
 `pip install bleak matplotlib pystray pillow && python3 tools/treadmill_app.py`.
 
+`tools/install_launcher.sh` installs a **Treadmill** entry (with an icon) in the XFCE application menu (Whisker menu, Utilities) for the current user -- the `.desktop` file needs absolute paths to this checkout and its `.venv`, so it's generated rather than checked in; re-run it after moving the repo. The app is single-instance: starting it again while it's already running (say, it's sitting in the tray) just asks the running copy to show its window and exits, since a second copy would otherwise disconnect the first one's BLE link as a "stale connection".
+
 The tray icon needs `gi` (PyGObject) for its GTK bindings -- that's a system package (`python3-gi`, `gir1.2-appindicator3-0.1` or `gir1.2-ayatanaappindicator3-0.1`), not something `pip install` can pull in on its own. If running from a venv, create it with `python3 -m venv --system-site-packages .venv` (or flip `include-system-site-packages` to `true` in an existing venv's `pyvenv.cfg`) so it can see the system's `gi`, otherwise `import pystray` fails with `ImportError: this platform is not supported: No module named 'gi'`.
 
 If any of these tools suddenly can't connect (scan fails, or connects then immediately fails with `BleakError: failed to discover services`), see `tools/BLE_CONNECTION_RELIABILITY.md` -- a known, recurring class of Linux/BlueZ-side connection fragility, unrelated to the board itself, with a quick diagnostic checklist and the fix for each cause found so far.
