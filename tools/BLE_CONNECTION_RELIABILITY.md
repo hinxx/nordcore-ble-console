@@ -9,8 +9,9 @@ itself frequently failing to establish at all, or refusing a reconnect,
 purely on the Linux/BlueZ host side. Confirmed the board's own BLE stack is
 not at fault every time this has come up.
 
-Two distinct causes found so far, both host-side, both requiring manual
-intervention when they happen:
+Three distinct causes found so far, all host-side (the first two) or
+board-side/adapter-side (the third), all needing a manual step when they
+happen apart from #1's self-heal:
 
 ## 1. `blueman-manager` grabs the connection out from under the app
 
@@ -63,6 +64,47 @@ require encryption, so an unbonded connection works exactly as well as a
 bonded one for actual use -- bonding here was only ever a mitigation attempt
 for problem #1, not something the app needs for correctness.
 
+## 3. The Bluetooth adapter's LE scanning is wedged (nothing can find the board)
+
+**Symptom**: the app says it can't find `TreadmillController`; a scan from
+*any* client sees **no BLE devices at all**, even with the board known to be
+advertising (check with a phone's BLE scanner app). `bluetoothctl info
+<mac>` shows no RSSI, and `hcitool con` may show a connection stuck forever
+at `state 5` (still connecting; a healthy link is `state 1`).
+
+**How it differs from #1/#2**: nothing holds a connection to the board and
+there's no stale bond -- the host simply can't scan. The giveaway is that
+BlueZ's discovery state machine is jammed:
+
+```bash
+bluetoothctl scan off    # -> Failed to stop discovery: org.bluez.Error.Failed
+bluetoothctl scan on     # -> Failed to start discovery: org.bluez.Error.InProgress
+dmesg | grep hci         # -> "command 0x2005 tx timeout" / "Opcode 0x2041 failed: -110"
+```
+
+(`0x2005`/`0x2041` are LE controller commands; the timeouts mean the USB
+adapter stopped answering them.) Seen on the Realtek USB dongle (`0bda:8771`)
+after days of uptime.
+
+**Don't be fooled by classic devices**: `bluetoothctl scan on` also does a
+classic (BR/EDR) *inquiry*, so it can list plenty of neighbouring devices
+(speakers, headsets) while LE scanning is completely dead. Judge by an LE
+scan (`bleak`'s `BleakScanner.discover()`), not by a long list in
+`bluetoothctl`.
+
+**What did NOT fix it**: `bluetoothctl power off/on` (power off itself
+fails), `rfkill block/unblock bluetooth`. **What does**: re-enumerate the
+dongle at the USB level -- physically unplug/replug it, or in software:
+
+```bash
+readlink -f /sys/class/bluetooth/hci*      # find the USB path, e.g. .../7-1.2.4/...
+sudo sh -c 'echo 0 > /sys/bus/usb/devices/7-1.2.4/authorized; sleep 2; echo 1 > /sys/bus/usb/devices/7-1.2.4/authorized'
+```
+
+(needs root; an unprivileged session can only do the rfkill/`power` things
+above, which don't help). Not fixed permanently -- a more robust adapter, or
+a USB power/autosuspend change, might; the trigger isn't pinned down.
+
 ## Working diagnostic checklist
 
 When "can't connect" comes up, fastest path to a diagnosis, in order:
@@ -78,6 +120,10 @@ ps aux | grep blueman-manager                 # is it running and holding it?
 - Connects, then `BleakError: failed to discover services, device
   disconnected` -> almost certainly cause #2. `bluetoothctl remove <mac>`,
   reconnect unbonded.
+- Board never found, and an LE scan sees *nothing at all* (not even other
+  BLE devices) with `scan off`/`scan on` failing as above -> cause #3.
+  Re-enumerate the USB adapter. (If an LE scan sees other devices but not the
+  board, the board really isn't advertising: check its power.)
 
 ## Self-healing for cause #1 (`tools/treadmill_app.py` only)
 
