@@ -118,8 +118,7 @@ sudo sh -c 'echo 0 > /sys/bus/usb/devices/7-1.2.4/authorized; sleep 2; echo 1 > 
 above, which don't help). Not fixed permanently -- a more robust adapter, or
 a USB power/autosuspend change, might; the trigger isn't pinned down.
 
-**Strongest lead (2026-10-12, not yet confirmed fixed): USB autosuspend of
-the dongle.** Reproducible on demand: with the dongle idle, *starting any LE
+**Cause and fix (confirmed 2026-10-12): USB autosuspend of the dongle.** Reproducible on demand: with the dongle idle, *starting any LE
 scan* produced `command 0x2005 tx timeout` / `Opcode 0x2041 failed: -110`
 within a second, and BlueZ then stuck at `StartDiscovery -> InProgress`.
 Meanwhile `/sys/module/btusb/parameters/enable_autosuspend` was `Y`, the
@@ -133,13 +132,18 @@ cat /sys/module/btusb/parameters/enable_autosuspend
 cat /sys/bus/usb/devices/<usb path>/power/{control,runtime_status}
 ```
 
-Fix to try (root): `tools/99-bt-no-autosuspend.rules` sets `power/control`
-to `on` for this dongle (0bda:8771) when it's plugged in -- install
-instructions are in the file. (A global alternative is `options btusb
-enable_autosuspend=0` in `/etc/modprobe.d/`.) If this holds up, update this
-section from "lead" to "fix"; if LE scans still fail with the dongle held
-awake, the dongle itself is the suspect and a different adapter is the next
-step.
+**Fix**: `tools/99-bt-no-autosuspend.rules` sets `power/control` to `on`
+for this dongle (0bda:8771) whenever it's plugged in -- install steps are in
+the file (root; `udevadm trigger` applies it to the plugged-in dongle, and
+the rule persists across replugs and reboots). **Confirmed**: with it
+installed and the dongle replugged, an LE scan saw 26 devices including
+`TreadmillController` (-54 dBm) with zero kernel errors, where before every
+LE scan start timed out and jammed discovery. (A global alternative is
+`options btusb enable_autosuspend=0` in `/etc/modprobe.d/`.) The earlier
+"what did NOT fix it" list above still stands: replugging alone, rfkill and
+`power off/on` never helped, because the dongle just went back to sleep.
+Likely applies to any Realtek USB Bluetooth dongle behind a hub on this
+machine; for a different dongle, change the vendor/product ids in the rule.
 
 ## Working diagnostic checklist
 
@@ -158,8 +162,10 @@ ps aux | grep blueman-manager                 # is it running and holding it?
   reconnect unbonded.
 - Board never found, and an LE scan sees *nothing at all* (not even other
   BLE devices) with `scan off`/`scan on` failing as above -> cause #3.
-  Re-enumerate the USB adapter. (If an LE scan sees other devices but not the
-  board, the board really isn't advertising: check its power.)
+  Check `power/runtime_status` of the dongle (`suspended` = this cause;
+  install the udev rule above) -- re-enumerating alone doesn't help. (If an
+  LE scan sees other devices but not the board, the board really isn't
+  advertising: check its power.)
 
 ## Self-healing for cause #1 (`tools/treadmill_app.py` only)
 
