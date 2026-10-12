@@ -1,0 +1,13 @@
+# Keep the Realtek RTL8761BU USB Bluetooth dongle (0bda:8771) from being
+# runtime-autosuspended by the kernel. With autosuspend on (btusb's default
+# here: 2s idle delay), the first LE command after the dongle has gone idle
+# times out (hci: "Opcode 0x2005/0x2041 failed: -110"), which leaves BlueZ's
+# discovery jammed (StartDiscovery -> InProgress) and BLE scanning dead while
+# classic Bluetooth (an active headset keeps it awake) still works. See
+# tools/BLE_CONNECTION_RELIABILITY.md, cause #3.
+#
+# Install (needs root), applies to the plugged-in dongle immediately:
+#   sudo cp tools/99-bt-no-autosuspend.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idProduct=8771 --action=add
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="8771", TEST=="power/control", ATTR{power/control}="on"

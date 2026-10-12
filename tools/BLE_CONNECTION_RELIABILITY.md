@@ -118,6 +118,29 @@ sudo sh -c 'echo 0 > /sys/bus/usb/devices/7-1.2.4/authorized; sleep 2; echo 1 > 
 above, which don't help). Not fixed permanently -- a more robust adapter, or
 a USB power/autosuspend change, might; the trigger isn't pinned down.
 
+**Strongest lead (2026-10-12, not yet confirmed fixed): USB autosuspend of
+the dongle.** Reproducible on demand: with the dongle idle, *starting any LE
+scan* produced `command 0x2005 tx timeout` / `Opcode 0x2041 failed: -110`
+within a second, and BlueZ then stuck at `StartDiscovery -> InProgress`.
+Meanwhile `/sys/module/btusb/parameters/enable_autosuspend` was `Y`, the
+dongle's `power/control` was `auto` with `autosuspend_delay_ms` = 2000, and
+its `runtime_status` was `suspended` (~61s suspended vs ~9.5s active since
+init). Classic Bluetooth kept working because active traffic (a connected
+headset) keeps the device resumed. Check it with:
+
+```bash
+cat /sys/module/btusb/parameters/enable_autosuspend
+cat /sys/bus/usb/devices/<usb path>/power/{control,runtime_status}
+```
+
+Fix to try (root): `tools/99-bt-no-autosuspend.rules` sets `power/control`
+to `on` for this dongle (0bda:8771) when it's plugged in -- install
+instructions are in the file. (A global alternative is `options btusb
+enable_autosuspend=0` in `/etc/modprobe.d/`.) If this holds up, update this
+section from "lead" to "fix"; if LE scans still fail with the dongle held
+awake, the dongle itself is the suspect and a different adapter is the next
+step.
+
 ## Working diagnostic checklist
 
 When "can't connect" comes up, fastest path to a diagnosis, in order:
