@@ -93,8 +93,21 @@ scan (`bleak`'s `BleakScanner.discover()`), not by a long list in
 `bluetoothctl`.
 
 **What did NOT fix it**: `bluetoothctl power off/on` (power off itself
-fails), `rfkill block/unblock bluetooth`. **What does**: re-enumerate the
-dongle at the USB level -- physically unplug/replug it, or in software:
+fails), `rfkill block/unblock bluetooth`. **Re-enumerating the dongle at the
+USB level** is the obvious next step -- physically unplug/replug it, or in
+software -- **but on 2026-10-12 it did NOT fix it either**: after a clean
+replug (even into a different port) the same `0x2005`/`0x2041` timeouts hit
+~9s after init, and afterwards `bluetoothctl scan le` and `bleak` both
+reported "Discovery started" with no kernel errors yet saw **zero** BLE
+devices (a paired iPhone nearby should alone produce some). So treat LE
+scanning as dead on that adapter until proven otherwise. Unconfirmed
+suspects: the dongle's LE side itself failing, or BlueZ's first post-init LE
+setup (random address / extended scan params, as used for background
+scanning for the paired+trusted devices -- an iPhone with an IRK, a
+WH-1000XM4) being something this Realtek firmware stops answering; the
+trigger isn't pinned down. Cheapest next experiments: try a different
+Bluetooth adapter; or remove the iPhone pairing (`bluetoothctl remove
+<mac>`, re-pairable) and replug. The software replug, for reference:
 
 ```bash
 readlink -f /sys/class/bluetooth/hci*      # find the USB path, e.g. .../7-1.2.4/...
